@@ -4,6 +4,7 @@ data class WaveformBucket(
     val min: Float,
     val max: Float,
     val rms: Float,
+    val frameCount: Long,
 )
 
 /**
