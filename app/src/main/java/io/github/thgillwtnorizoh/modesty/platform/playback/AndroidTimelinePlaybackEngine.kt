@@ -3,6 +3,7 @@ package io.github.thgillwtnorizoh.modesty.platform.playback
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import io.github.thgillwtnorizoh.modesty.core.dsp.GainProcessor
 import io.github.thgillwtnorizoh.modesty.core.io.AudioDecoder
 import io.github.thgillwtnorizoh.modesty.core.model.AudioProject
 import io.github.thgillwtnorizoh.modesty.core.model.AudioSource
@@ -13,9 +14,9 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Brick #5 reference backend. It streams one non-overlapping timeline through one AudioTrack.
- * Gaps are written as real zero samples, so the hardware playback head remains the clock even
- * after split/delete operations create silence between clips.
+ * Reference Android backend. It streams one non-overlapping timeline through one AudioTrack.
+ * Gaps are written as real zero samples, and Brick #7 routes clip gain through the same
+ * GainProcessor used by the editor core before samples reach Android audio output.
  */
 class AndroidTimelinePlaybackEngine(
     private val decoderFactory: (AudioSource) -> AudioDecoder,
@@ -49,7 +50,7 @@ class AndroidTimelinePlaybackEngine(
 
     private val generation = AtomicInteger(0)
     private val worker = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "Modesty-Brick5-TimelinePlayback").apply { isDaemon = true }
+        Thread(runnable, "Modesty-TimelinePlayback").apply { isDaemon = true }
     }
 
     override fun load(project: AudioProject) {
@@ -199,6 +200,7 @@ class AndroidTimelinePlaybackEngine(
                     require(decoder.info.channelCount == plan.channelCount) { "Decoder channel count changed" }
                     require(decoder.info.totalFrames >= segment.source.totalFrames) { "Decoder source became shorter" }
                     decoder.seekToSourceFrame(segment.sourceFrameForTimeline(plan.project, cursor))
+                    val gainProcessor = GainProcessor(segment.clip.gain)
 
                     while (
                         isCurrent(token) &&
@@ -213,6 +215,15 @@ class AndroidTimelinePlaybackEngine(
                         for (index in 0 until sampleCount) {
                             if (!samples[index].isFinite()) samples[index] = 0f
                         }
+                        gainProcessor.process(samples, samples, framesRead, channelCount)
+                        for (index in 0 until sampleCount) {
+                            samples[index] = if (samples[index].isFinite()) {
+                                samples[index].coerceIn(-1f, 1f)
+                            } else {
+                                0f
+                            }
+                        }
+
                         writeFully(output, samples, sampleCount, token)
                         cursor += framesRead
                         submittedFrames += framesRead
@@ -278,7 +289,7 @@ class AndroidTimelinePlaybackEngine(
         val channelMask = when (plan.channelCount) {
             1 -> AudioFormat.CHANNEL_OUT_MONO
             2 -> AudioFormat.CHANNEL_OUT_STEREO
-            else -> error("Brick 5 playback supports only mono/stereo output")
+            else -> error("Playback supports only mono/stereo output")
         }
         val encoding = AudioFormat.ENCODING_PCM_FLOAT
         val frameBytes = plan.channelCount * Float.SIZE_BYTES

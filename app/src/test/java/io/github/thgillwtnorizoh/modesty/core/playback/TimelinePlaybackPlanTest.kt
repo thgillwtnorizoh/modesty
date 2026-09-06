@@ -52,6 +52,27 @@ class TimelinePlaybackPlanTest {
     }
 
     @Test
+    fun carriesPerClipGainIntoPlaybackSegments() {
+        val source = source()
+        val project = AudioProject(
+            id = "project",
+            title = "Gain",
+            timelineRate = source.sampleRate,
+            sources = mapOf(source.id to source),
+            tracks = listOf(
+                AudioTrack(
+                    "track",
+                    "Track",
+                    listOf(AudioClip("loud", source.id, SourceRange(0, 1_000), 0, gain = 2f)),
+                ),
+            ),
+        )
+
+        val plan = TimelinePlaybackPlan.from(project)
+        assertEquals(2f, plan.segments.single().clip.gain, 0f)
+    }
+
+    @Test
     fun rejectsOverlappingClipsUntilMixerExists() {
         val source = source()
         val project = AudioProject(

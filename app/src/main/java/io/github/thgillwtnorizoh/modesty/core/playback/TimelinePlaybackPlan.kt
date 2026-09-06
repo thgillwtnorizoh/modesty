@@ -5,7 +5,7 @@ import io.github.thgillwtnorizoh.modesty.core.model.AudioProject
 import io.github.thgillwtnorizoh.modesty.core.model.AudioSource
 import io.github.thgillwtnorizoh.modesty.core.model.SampleRate
 
-/** One non-overlapping piece of audio on Brick #5's single playback track. */
+/** One non-overlapping piece of audio on the current single playback track. */
 data class TimelinePlaybackSegment(
     val source: AudioSource,
     val clip: AudioClip,
@@ -26,9 +26,9 @@ data class TimelinePlaybackSegment(
 }
 
 /**
- * Brick #5 playback plan: exactly one track, but that track may contain several non-overlapping
- * clips and silence gaps. All clips must currently share one output format because the realtime
- * resampler/mixer has not been introduced yet.
+ * Current playback plan: exactly one track, but that track may contain several non-overlapping
+ * clips, silence gaps, and per-clip gain. All clips must currently share one output format because
+ * the realtime resampler/mixer has not been introduced yet.
  */
 data class TimelinePlaybackPlan(
     val project: AudioProject,
@@ -54,22 +54,21 @@ data class TimelinePlaybackPlan(
 
     companion object {
         fun from(project: AudioProject): TimelinePlaybackPlan {
-            require(project.tracks.size == 1) { "Brick 5 playback supports exactly one track" }
+            require(project.tracks.size == 1) { "Playback currently supports exactly one track" }
             val clips = project.tracks.single().clips.sortedBy { it.timelineStartFrame }
-            require(clips.isNotEmpty()) { "Brick 5 playback needs at least one clip" }
+            require(clips.isNotEmpty()) { "Playback needs at least one clip" }
 
             val segments = clips.map { clip ->
                 val source = project.sources[clip.sourceId]
                     ?: error("Clip ${clip.id} references missing source ${clip.sourceId}")
                 require(project.timelineRate == source.sampleRate) {
-                    "Brick 5 has no resampler yet: project and source rates must match"
+                    "Playback has no resampler yet: project and source rates must match"
                 }
                 require(source.channelCount in 1..2) {
-                    "Brick 5 playback currently supports mono or stereo sources"
+                    "Playback currently supports mono or stereo sources"
                 }
-                require(clip.gain == 1f) { "Brick 5 playback does not apply clip gain yet" }
                 require(clip.fadeInSourceFrames == 0L && clip.fadeOutSourceFrames == 0L) {
-                    "Brick 5 playback does not apply fades yet"
+                    "Playback does not apply fades yet"
                 }
                 TimelinePlaybackSegment(
                     source = source,
@@ -80,17 +79,17 @@ data class TimelinePlaybackPlan(
 
             segments.zipWithNext().forEach { (left, right) ->
                 require(left.timelineEndFrameExclusive <= right.timelineStartFrame) {
-                    "Brick 5 playback does not mix overlapping clips yet"
+                    "Playback does not mix overlapping clips yet"
                 }
             }
 
             val firstSource = segments.first().source
             segments.drop(1).forEach { segment ->
                 require(segment.source.sampleRate == firstSource.sampleRate) {
-                    "Brick 5 playback needs one sample rate until the resampler exists"
+                    "Playback needs one sample rate until the resampler exists"
                 }
                 require(segment.source.channelCount == firstSource.channelCount) {
-                    "Brick 5 playback needs one channel layout until the mixer exists"
+                    "Playback needs one channel layout until the mixer exists"
                 }
             }
 

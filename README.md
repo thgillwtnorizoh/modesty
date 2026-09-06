@@ -18,13 +18,15 @@ The foundation is being built and tested one brick at a time:
 - real WAV decoding
 - hardware-derived playback playhead
 - non-overlapping multi-clip timeline with real silence gaps
+- horizontal clip movement with explicit overlap constraints
+- per-clip gain routed through the shared `GainProcessor`
 - Android shell kept dependency-light
 
 The project currently targets `compileSdk 36` / `targetSdk 36` and uses JDK 17. This is intentional while the core is being established so CI does not depend on API 37 tooling.
 
 ## Current brick
 
-**Brick #6: horizontal clip movement**
+**Brick #7: gain / amplify + audible preview**
 
 The Android shell can now:
 
@@ -36,11 +38,16 @@ The Android shell can now:
 - trim, split, and non-ripple delete without modifying the WAV
 - render and play multiple sequential clips plus silence gaps
 - drag the `C#` strip at the top of a clip to move it horizontally
-- preview movement before release
 - prevent clips from overlapping or crossing neighbours
-- undo and redo a completed move as one edit
+- enter a dB value and amplify/attenuate any selected timeline range
+- split gain boundaries automatically so only selected audio changes
+- preview only the selected range after applying gain
+- undo and redo amplification as one edit
+- preserve clip gain across Android configuration recreation
 
-Clip movement currently stays on one track. Neighbouring clips are hard walls until the project gains a real mixer/overlap model. The waveform-body selection gesture and vertical page scrolling remain separate from the clip-header movement gesture.
+Amplify does not rewrite PCM. It converts the UI dB value to a linear multiplier, stores the result in clip metadata, then playback routes decoded float PCM through the same UI-independent `GainProcessor` established in the foundation. Quick Amplify and the later full editor therefore share the same path.
+
+Brick #7 accepts -60 dB through +24 dB in the Android UI. Positive gain is currently allowed to hard-clip at output when the source has insufficient headroom. Peak scanning and clipping-aware amplification policy come later; the DSP and editing layers remain separate from that policy.
 
 Currently supported WAV sample encodings:
 
@@ -48,7 +55,7 @@ Currently supported WAV sample encodings:
 - IEEE float: 32 and 64-bit
 - WAVE_FORMAT_EXTENSIBLE when its sub-format is PCM or IEEE float
 
-Playback is still intentionally limited to one mono/stereo track at its native sample rate. Mixing, resampling, effects UI, and export come later.
+Playback is still intentionally limited to one mono/stereo track at its native sample rate. Mixing, resampling, fades, additional codecs, and export come later.
 
 ## First useful target
 

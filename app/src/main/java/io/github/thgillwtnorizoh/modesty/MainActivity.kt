@@ -1,19 +1,25 @@
 package io.github.thgillwtnorizoh.modesty
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
+import android.text.InputType
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import io.github.thgillwtnorizoh.modesty.core.dsp.decibelsToLinearGain
+import io.github.thgillwtnorizoh.modesty.core.dsp.linearGainToDecibels
+import io.github.thgillwtnorizoh.modesty.core.editing.AmplifyTimelineRange
 import io.github.thgillwtnorizoh.modesty.core.editing.DeleteTimelineRange
 import io.github.thgillwtnorizoh.modesty.core.editing.MoveClip
 import io.github.thgillwtnorizoh.modesty.core.editing.ProjectEditor
@@ -37,6 +43,7 @@ import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.abs
 
 class MainActivity : Activity() {
     private lateinit var statusText: TextView
@@ -47,10 +54,12 @@ class MainActivity : Activity() {
     private lateinit var trimButton: Button
     private lateinit var splitButton: Button
     private lateinit var deleteButton: Button
+    private lateinit var amplifyButton: Button
     private lateinit var undoButton: Button
     private lateinit var redoButton: Button
     private lateinit var timeText: TextView
     private lateinit var selectionText: TextView
+    private lateinit var gainSummaryText: TextView
     private lateinit var playbackEngine: AndroidTimelinePlaybackEngine
 
     private val worker = Executors.newSingleThreadExecutor()
@@ -74,6 +83,7 @@ class MainActivity : Activity() {
     private var restoredSourceStarts: LongArray? = null
     private var restoredSourceEnds: LongArray? = null
     private var restoredTimelineStarts: LongArray? = null
+    private var restoredGains: FloatArray? = null
 
     private val progressTicker = object : Runnable {
         override fun run() {
@@ -90,6 +100,7 @@ class MainActivity : Activity() {
             restoredSourceStarts = savedInstanceState.getLongArray(STATE_CLIP_SOURCE_STARTS)
             restoredSourceEnds = savedInstanceState.getLongArray(STATE_CLIP_SOURCE_ENDS)
             restoredTimelineStarts = savedInstanceState.getLongArray(STATE_CLIP_TIMELINE_STARTS)
+            restoredGains = savedInstanceState.getFloatArray(STATE_CLIP_GAINS)
         }
 
         playbackEngine = AndroidTimelinePlaybackEngine { source ->
@@ -100,7 +111,6 @@ class MainActivity : Activity() {
         }
         setContentView(buildContent())
         uiHandler.post(progressTicker)
-
         selectedUri?.let { loadWav(Uri.parse(it)) }
     }
 
@@ -117,21 +127,19 @@ class MainActivity : Activity() {
             textSize = 30f
             gravity = Gravity.CENTER
         })
-
         root.addView(TextView(this).apply {
-            text = "Foundation brick 6\nThe clips have acquired wheels."
+            text = "Foundation brick 7\nThe boy can roar now."
             textSize = 16f
             gravity = Gravity.CENTER
             setPadding(0, dp(6), 0, dp(18))
         })
-
         root.addView(Button(this).apply {
             text = "Open WAV"
             setOnClickListener { chooseWav() }
         })
 
         statusText = TextView(this).apply {
-            text = "Choose a WAV file to inspect, play, edit, and arrange."
+            text = "Choose a WAV file to inspect, play, edit, arrange, and amplify."
             textSize = 15f
             gravity = Gravity.CENTER
             setPadding(0, dp(16), 0, dp(8))
@@ -176,10 +184,7 @@ class MainActivity : Activity() {
 
         waveformView = WaveformView(this).apply {
             setPadding(dp(4), dp(4), dp(4), dp(4))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(320),
-            )
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(320))
             onSeekRequested = { frame ->
                 if (playbackLoaded) {
                     playbackEngine.seekTo(frame)
@@ -192,17 +197,11 @@ class MainActivity : Activity() {
                 updateSelectionUi()
             }
             onClipMoveBoundsRequested = { clipId ->
-                val editor = projectEditor
-                if (editor == null) {
-                    0L..0L
-                } else {
-                    val bounds = editor.project.clipMoveBounds(TRACK_ID, clipId)
+                projectEditor?.project?.clipMoveBounds(TRACK_ID, clipId)?.let { bounds ->
                     bounds.minimumStartFrame..bounds.maximumStartFrame
-                }
+                } ?: (0L..0L)
             }
-            onClipMoveCommitted = { clipId, newStart ->
-                moveClip(clipId, newStart)
-            }
+            onClipMoveCommitted = { clipId, newStart -> moveClip(clipId, newStart) }
         }
         root.addView(waveformView)
 
@@ -214,7 +213,7 @@ class MainActivity : Activity() {
         }
         root.addView(selectionText)
 
-        val editControlsTop = LinearLayout(this).apply {
+        val editControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
@@ -233,10 +232,25 @@ class MainActivity : Activity() {
             isEnabled = false
             setOnClickListener { deleteSelection() }
         }
-        editControlsTop.addView(trimButton)
-        editControlsTop.addView(splitButton)
-        editControlsTop.addView(deleteButton)
-        root.addView(editControlsTop)
+        editControls.addView(trimButton)
+        editControls.addView(splitButton)
+        editControls.addView(deleteButton)
+        root.addView(editControls)
+
+        amplifyButton = Button(this).apply {
+            text = "Amplify…"
+            isEnabled = false
+            setOnClickListener { showAmplifyDialog() }
+        }
+        root.addView(amplifyButton)
+
+        gainSummaryText = TextView(this).apply {
+            text = "Clip gain: waiting for audio."
+            textSize = 12f
+            gravity = Gravity.CENTER
+            setPadding(0, dp(4), 0, dp(6))
+        }
+        root.addView(gainSummaryText)
 
         val historyControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -257,7 +271,7 @@ class MainActivity : Activity() {
         root.addView(historyControls)
 
         root.addView(TextView(this).apply {
-            text = "Drag the C# strip at the top of a clip to move it. Neighbouring clips are hard walls for now, so clips cannot overlap or cross.\nThe original WAV remains untouched."
+            text = "Amplify changes clip metadata, not the source WAV. Apply & Preview plays only the selected range. Positive gain can hard-clip if the source has no headroom."
             textSize = 12f
             gravity = Gravity.CENTER
             setPadding(0, dp(12), 0, 0)
@@ -290,6 +304,75 @@ class MainActivity : Activity() {
         updatePlaybackUi()
     }
 
+    private fun showAmplifyDialog() {
+        val editor = projectEditor ?: return
+        val start = selectionTimelineStartFrame ?: return
+        val end = selectionTimelineEndFrameExclusive ?: return
+        if (!selectionOverlapsAudio(editor.project, start, end)) return
+
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or
+                InputType.TYPE_NUMBER_FLAG_DECIMAL or
+                InputType.TYPE_NUMBER_FLAG_SIGNED
+            setText("6.0")
+            selectAll()
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Amplify selection")
+            .setMessage("Enter gain in dB. Brick #7 accepts -60 to +24 dB. Positive gain may clip.")
+            .setView(input)
+            .setNegativeButton("Cancel", null)
+            .setNeutralButton("Apply") { _, _ -> applyGainFromText(input.text.toString(), preview = false) }
+            .setPositiveButton("Apply & Preview") { _, _ -> applyGainFromText(input.text.toString(), preview = true) }
+            .show()
+    }
+
+    private fun applyGainFromText(text: String, preview: Boolean) {
+        val decibels = text.trim().toFloatOrNull()
+        if (decibels == null || !decibels.isFinite() || decibels !in MIN_GAIN_DB..MAX_GAIN_DB) {
+            statusText.text = "Amplify needs a number from ${MIN_GAIN_DB.toInt()} to +${MAX_GAIN_DB.toInt()} dB."
+            return
+        }
+        if (abs(decibels) < 0.0001f) {
+            statusText.text = "0 dB changes nothing, which is impressively accurate but not very exciting."
+            return
+        }
+        amplifySelection(decibels, preview)
+    }
+
+    private fun amplifySelection(decibels: Float, preview: Boolean) {
+        val editor = projectEditor ?: return
+        val start = selectionTimelineStartFrame ?: return
+        val end = selectionTimelineEndFrameExclusive ?: return
+        if (!selectionOverlapsAudio(editor.project, start, end)) return
+
+        playbackEngine.stop()
+        try {
+            editor.apply(
+                AmplifyTimelineRange(
+                    trackId = TRACK_ID,
+                    startTimelineFrame = start,
+                    endTimelineFrameExclusive = end,
+                    gainMultiplier = decibelsToLinearGain(decibels),
+                    rightClipIdAtStart = newClipId(),
+                    rightClipIdAtEnd = newClipId(),
+                ),
+            )
+            val warning = if (decibels > 0f) " Positive gain may clip." else ""
+            bindEditorProject(
+                statusMessage = "Applied ${formatDb(decibels)} nondestructively.$warning",
+                preservedSelection = start to end,
+            )
+            if (preview && playbackLoaded) {
+                playbackEngine.play(startFrame = start, endFrameExclusive = end)
+                updatePlaybackUi()
+            }
+        } catch (error: Throwable) {
+            statusText.text = "Amplify failed: ${error.message ?: error.javaClass.simpleName}"
+        }
+    }
+
     private fun trimToSelection() {
         val editor = projectEditor ?: return
         val start = selectionTimelineStartFrame ?: return
@@ -304,10 +387,7 @@ class MainActivity : Activity() {
             project.projectFramesToSourceFrames(clip.sourceId, start - clipStart)
         val sourceEnd = clip.sourceRange.startFrame +
             project.projectFramesToSourceFrames(clip.sourceId, end - clipStart)
-        if (
-            sourceStart <= clip.sourceRange.startFrame &&
-            sourceEnd >= clip.sourceRange.endFrameExclusive
-        ) return
+        if (sourceStart <= clip.sourceRange.startFrame && sourceEnd >= clip.sourceRange.endFrameExclusive) return
 
         playbackEngine.stop()
         try {
@@ -319,9 +399,7 @@ class MainActivity : Activity() {
                     newSourceEndFrameExclusive = sourceEnd.coerceAtMost(clip.sourceRange.endFrameExclusive),
                 ),
             )
-            bindEditorProject(
-                "Trimmed nondestructively to ${formatDuration(end - start, loadedSampleRate)}. Source WAV untouched.",
-            )
+            bindEditorProject("Trimmed nondestructively to ${formatDuration(end - start, loadedSampleRate)}.")
         } catch (error: Throwable) {
             statusText.text = "Trim failed: ${error.message ?: error.javaClass.simpleName}"
         }
@@ -332,7 +410,6 @@ class MainActivity : Activity() {
         val start = selectionTimelineStartFrame ?: return
         val end = selectionTimelineEndFrameExclusive ?: return
         val before = editor.project
-
         playbackEngine.stop()
         try {
             editor.apply(
@@ -348,9 +425,8 @@ class MainActivity : Activity() {
                 statusText.text = "Selection boundaries were already split."
                 return
             }
-            val count = editor.project.tracks.single().clips.size
             bindEditorProject(
-                statusMessage = "Split selection boundaries. Timeline now has $count clips.",
+                "Split selection boundaries. Timeline now has ${editor.project.tracks.single().clips.size} clips.",
                 preservedSelection = start to end,
             )
         } catch (error: Throwable) {
@@ -363,7 +439,6 @@ class MainActivity : Activity() {
         val start = selectionTimelineStartFrame ?: return
         val end = selectionTimelineEndFrameExclusive ?: return
         if (!selectionOverlapsAudio(editor.project, start, end)) return
-
         playbackEngine.stop()
         try {
             editor.apply(
@@ -374,9 +449,7 @@ class MainActivity : Activity() {
                     rightClipId = newClipId(),
                 ),
             )
-            bindEditorProject(
-                "Deleted selected audio nondestructively. The gap now plays as silence.",
-            )
+            bindEditorProject("Deleted selected audio nondestructively. The gap now plays as silence.")
         } catch (error: Throwable) {
             statusText.text = "Delete failed: ${error.message ?: error.javaClass.simpleName}"
         }
@@ -395,8 +468,7 @@ class MainActivity : Activity() {
             editor.apply(MoveClip(TRACK_ID, clipId, target))
             bindEditorProject("Moved clip nondestructively. One drag is one undo step.")
         } catch (error: Throwable) {
-            statusText.text = "Move failed: ${error.message ?: error.javaClass.simpleName}"
-            bindEditorProject(statusText.text.toString())
+            bindEditorProject("Move failed: ${error.message ?: error.javaClass.simpleName}")
         }
     }
 
@@ -432,13 +504,11 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != REQUEST_OPEN_WAV || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
-
         try {
             contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         } catch (_: SecurityException) {
-            // Some providers grant only temporary access. The current selection still remains usable.
+            // Some providers grant only temporary access. The current selection remains usable.
         }
-
         selectedUri = uri.toString()
         clearRestoredClips()
         loadWav(uri)
@@ -459,6 +529,7 @@ class MainActivity : Activity() {
         lastShownPlaybackError = null
         statusText.text = "Reading WAV and building waveform…"
         metadataText.text = ""
+        gainSummaryText.text = "Clip gain: waiting for audio."
         waveformView.clearWaveform()
         updateSelectionUi()
         updatePlaybackUi()
@@ -466,8 +537,7 @@ class MainActivity : Activity() {
         worker.execute {
             try {
                 val decoder = WavDecoder {
-                    contentResolver.openInputStream(uri)
-                        ?: error("Android could not open this document")
+                    contentResolver.openInputStream(uri) ?: error("Android could not open this document")
                 }
                 val metadata = decoder.metadata
                 val pyramid = try {
@@ -487,7 +557,7 @@ class MainActivity : Activity() {
                     totalFrames = metadata.info.totalFrames,
                 )
                 val baseProject = AudioProject(
-                    id = "brick6-project",
+                    id = "brick7-project",
                     title = displayName,
                     timelineRate = source.sampleRate,
                     sources = mapOf(source.id to source),
@@ -533,7 +603,7 @@ class MainActivity : Activity() {
                     metadataText.text = details
                     projectEditor = ProjectEditor(restoredProject)
                     clearRestoredClips()
-                    bindEditorProject("Waveform ready. Clip movement armed.")
+                    bindEditorProject("Waveform ready. Gain stage armed.")
                 }
             } catch (error: Throwable) {
                 runOnUiThread {
@@ -543,6 +613,7 @@ class MainActivity : Activity() {
                     playbackLoaded = false
                     statusText.text = "Could not read/play this WAV."
                     metadataText.text = error.message ?: error.javaClass.simpleName
+                    gainSummaryText.text = "Clip gain: unavailable."
                     waveformView.clearWaveform()
                     updateSelectionUi()
                     updatePlaybackUi()
@@ -560,10 +631,12 @@ class MainActivity : Activity() {
         val sourceStarts = restoredSourceStarts ?: return baseProject
         val sourceEnds = restoredSourceEnds ?: return baseProject
         val timelineStarts = restoredTimelineStarts ?: return baseProject
+        val gains = restoredGains ?: FloatArray(ids.size) { 1f }
         if (
             ids.size != sourceStarts.size ||
             ids.size != sourceEnds.size ||
-            ids.size != timelineStarts.size
+            ids.size != timelineStarts.size ||
+            ids.size != gains.size
         ) return baseProject
 
         return runCatching {
@@ -572,16 +645,16 @@ class MainActivity : Activity() {
                 require(sourceEnds[index] <= source.totalFrames)
                 require(sourceEnds[index] > sourceStarts[index])
                 require(timelineStarts[index] >= 0)
+                require(gains[index] >= 0f && gains[index].isFinite())
                 AudioClip(
                     id = ids[index],
                     sourceId = source.id,
                     sourceRange = SourceRange(sourceStarts[index], sourceEnds[index]),
                     timelineStartFrame = timelineStarts[index],
+                    gain = gains[index],
                 )
             }
-            baseProject.copy(
-                tracks = listOf(ProjectTrack(TRACK_ID, displayName, clips)),
-            ).validate()
+            baseProject.copy(tracks = listOf(ProjectTrack(TRACK_ID, displayName, clips))).validate()
         }.getOrElse { baseProject }
     }
 
@@ -591,8 +664,7 @@ class MainActivity : Activity() {
     ) {
         val editor = projectEditor ?: return
         val project = editor.project
-        val track = project.tracks.single()
-        val clips = track.clips.sortedBy { it.timelineStartFrame }
+        val clips = project.tracks.single().clips.sortedBy { it.timelineStartFrame }
         val cache = waveformCache ?: return
 
         selectionTimelineStartFrame = null
@@ -630,6 +702,7 @@ class MainActivity : Activity() {
         }
 
         statusText.text = statusMessage
+        updateGainSummary(project)
         updateSelectionUi()
         updatePlaybackUi()
     }
@@ -646,8 +719,18 @@ class MainActivity : Activity() {
             )
         }
 
+    private fun updateGainSummary(project: AudioProject) {
+        val clips = project.tracks.single().clips.sortedBy { it.timelineStartFrame }
+        gainSummaryText.text = if (clips.isEmpty()) {
+            "Clip gain: no clips."
+        } else {
+            clips.mapIndexed { index, clip -> "C${index + 1} ${formatLinearGain(clip.gain)}" }
+                .joinToString(prefix = "Clip gain: ", separator = " • ")
+        }
+    }
+
     private fun updateSelectionUi() {
-        if (!::selectionText.isInitialized || !::trimButton.isInitialized) return
+        if (!::selectionText.isInitialized || !::trimButton.isInitialized || !::amplifyButton.isInitialized) return
         val editor = projectEditor
         val start = selectionTimelineStartFrame
         val end = selectionTimelineEndFrameExclusive
@@ -657,6 +740,7 @@ class MainActivity : Activity() {
             trimButton.isEnabled = false
             splitButton.isEnabled = false
             deleteButton.isEnabled = false
+            amplifyButton.isEnabled = false
             updateHistoryButtons()
             return
         }
@@ -680,19 +764,18 @@ class MainActivity : Activity() {
             (start != single.timelineStartFrame || end != project.clipTimelineEndFrameExclusive(single))
         splitButton.isEnabled = clips.isNotEmpty() && selectionCanCreateSplit(project, start, end)
         deleteButton.isEnabled = selectionOverlapsAudio(project, start, end)
+        amplifyButton.isEnabled = selectionOverlapsAudio(project, start, end)
         updateHistoryButtons()
     }
 
     private fun updateHistoryButtons() {
         if (!::undoButton.isInitialized || !::redoButton.isInitialized) return
-        val editor = projectEditor
-        undoButton.isEnabled = editor?.canUndo == true
-        redoButton.isEnabled = editor?.canRedo == true
+        undoButton.isEnabled = projectEditor?.canUndo == true
+        redoButton.isEnabled = projectEditor?.canRedo == true
     }
 
     private fun updatePlaybackUi() {
         if (!::playPauseButton.isInitialized) return
-
         playPauseButton.isEnabled = playbackLoaded
         playPauseButton.text = if (playbackEngine.state == PlaybackState.PLAYING) "Pause" else "Play"
         stopButton.isEnabled = playbackLoaded &&
@@ -710,11 +793,9 @@ class MainActivity : Activity() {
             return
         }
 
-        val frame = playbackEngine.playheadFrame
-            .coerceIn(timelineWindowStartFrame, timelineWindowEndFrameExclusive)
+        val frame = playbackEngine.playheadFrame.coerceIn(timelineWindowStartFrame, timelineWindowEndFrameExclusive)
         waveformView.setPlayheadFrame(frame)
-        val relativeFrame = frame - timelineWindowStartFrame
-        timeText.text = "${formatDuration(relativeFrame, loadedSampleRate)} / ${formatDuration(durationFrames, loadedSampleRate)}"
+        timeText.text = "${formatDuration(frame - timelineWindowStartFrame, loadedSampleRate)} / ${formatDuration(durationFrames, loadedSampleRate)}"
 
         val error = playbackEngine.lastError
         if (error != null && error != lastShownPlaybackError) {
@@ -723,28 +804,19 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun selectionInsideClip(
-        project: AudioProject,
-        clip: AudioClip,
-        start: Long,
-        end: Long,
-    ): Boolean =
+    private fun selectionInsideClip(project: AudioProject, clip: AudioClip, start: Long, end: Long): Boolean =
         start >= clip.timelineStartFrame && end <= project.clipTimelineEndFrameExclusive(clip)
 
-    private fun selectionCanCreateSplit(project: AudioProject, start: Long, end: Long): Boolean {
-        val clips = project.tracks.single().clips
-        return clips.any { clip ->
+    private fun selectionCanCreateSplit(project: AudioProject, start: Long, end: Long): Boolean =
+        project.tracks.single().clips.any { clip ->
             val clipStart = clip.timelineStartFrame
             val clipEnd = project.clipTimelineEndFrameExclusive(clip)
             (start > clipStart && start < clipEnd) || (end > clipStart && end < clipEnd)
         }
-    }
 
     private fun selectionOverlapsAudio(project: AudioProject, start: Long, end: Long): Boolean =
         project.tracks.single().clips.any { clip ->
-            val clipStart = clip.timelineStartFrame
-            val clipEnd = project.clipTimelineEndFrameExclusive(clip)
-            maxOf(start, clipStart) < minOf(end, clipEnd)
+            maxOf(start, clip.timelineStartFrame) < minOf(end, project.clipTimelineEndFrameExclusive(clip))
         }
 
     private fun interactionHint(): String =
@@ -768,6 +840,13 @@ class MainActivity : Activity() {
         return String.format(Locale.US, "%d:%06.3f", minutesPart, secondsPart)
     }
 
+    private fun formatDb(decibels: Float): String = String.format(Locale.US, "%+.1f dB", decibels)
+
+    private fun formatLinearGain(gain: Float): String {
+        val db = linearGainToDecibels(gain)
+        return if (db.isFinite()) formatDb(db) else "-∞ dB"
+    }
+
     private fun newClipId(): String = "clip-${UUID.randomUUID()}"
 
     private fun clearRestoredClips() {
@@ -775,6 +854,7 @@ class MainActivity : Activity() {
         restoredSourceStarts = null
         restoredSourceEnds = null
         restoredTimelineStarts = null
+        restoredGains = null
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
@@ -793,6 +873,7 @@ class MainActivity : Activity() {
             outState.putLongArray(STATE_CLIP_SOURCE_STARTS, clips.map { it.sourceRange.startFrame }.toLongArray())
             outState.putLongArray(STATE_CLIP_SOURCE_ENDS, clips.map { it.sourceRange.endFrameExclusive }.toLongArray())
             outState.putLongArray(STATE_CLIP_TIMELINE_STARTS, clips.map { it.timelineStartFrame }.toLongArray())
+            outState.putFloatArray(STATE_CLIP_GAINS, clips.map { it.gain }.toFloatArray())
         }
         super.onSaveInstanceState(outState)
     }
@@ -812,7 +893,10 @@ class MainActivity : Activity() {
         private const val STATE_CLIP_SOURCE_STARTS = "clip_source_starts"
         private const val STATE_CLIP_SOURCE_ENDS = "clip_source_ends"
         private const val STATE_CLIP_TIMELINE_STARTS = "clip_timeline_starts"
+        private const val STATE_CLIP_GAINS = "clip_gains"
         private const val TRACK_ID = "track-1"
         private const val INITIAL_CLIP_ID = "clip-1"
+        private const val MIN_GAIN_DB = -60f
+        private const val MAX_GAIN_DB = 24f
     }
 }
