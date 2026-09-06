@@ -1076,6 +1076,7 @@ class MainActivity : Activity() {
         addWavButton.text = if (importInProgress) "Adding…" else "Add WAV"
         exportButton.isEnabled = hasAudio && !exportInProgress && !importInProgress
         exportButton.text = if (exportInProgress) "Exporting…" else "Export WAV"
+        updateHistoryButtons()
     }
 
     private fun updateHistoryButtons() {
