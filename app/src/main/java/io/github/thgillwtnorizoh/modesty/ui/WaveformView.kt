@@ -4,8 +4,10 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.view.MotionEvent
 import android.view.View
 import io.github.thgillwtnorizoh.modesty.core.waveform.WaveformCache
+import kotlin.math.roundToLong
 
 class WaveformView(context: Context) : View(context) {
     private val waveformPaint = Paint().apply {
@@ -17,6 +19,11 @@ class WaveformView(context: Context) : View(context) {
         color = Color.rgb(190, 190, 190)
         strokeWidth = 1f
     }
+    private val playheadPaint = Paint().apply {
+        color = Color.rgb(205, 45, 45)
+        strokeWidth = 2f * resources.displayMetrics.density
+        isAntiAlias = false
+    }
     private val textPaint = Paint().apply {
         color = Color.rgb(100, 100, 100)
         textSize = 14f * resources.displayMetrics.scaledDensity
@@ -27,6 +34,9 @@ class WaveformView(context: Context) : View(context) {
     private var sourceId: String? = null
     private var totalFrames: Long = 0
     private var channelCount: Int = 0
+    private var playheadFrame: Long = 0
+
+    var onSeekRequested: ((Long) -> Unit)? = null
 
     fun setWaveform(
         cache: WaveformCache,
@@ -38,6 +48,14 @@ class WaveformView(context: Context) : View(context) {
         this.sourceId = sourceId
         this.totalFrames = totalFrames
         this.channelCount = channelCount
+        playheadFrame = 0
+        invalidate()
+    }
+
+    fun setPlayheadFrame(frame: Long) {
+        val clamped = frame.coerceIn(0L, totalFrames.coerceAtLeast(0L))
+        if (clamped == playheadFrame) return
+        playheadFrame = clamped
         invalidate()
     }
 
@@ -46,6 +64,7 @@ class WaveformView(context: Context) : View(context) {
         sourceId = null
         totalFrames = 0
         channelCount = 0
+        playheadFrame = 0
         invalidate()
     }
 
@@ -104,5 +123,40 @@ class WaveformView(context: Context) : View(context) {
                 )
             }
         }
+
+        val playheadX = paddingLeft +
+            (playheadFrame.toDouble() / totalFrames.toDouble() * drawableWidth).toFloat()
+        canvas.drawLine(
+            playheadX,
+            paddingTop.toFloat(),
+            playheadX,
+            (height - paddingBottom).toFloat(),
+            playheadPaint,
+        )
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (cache == null || totalFrames <= 0) return false
+        return when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> true
+            MotionEvent.ACTION_UP -> {
+                val drawableWidth = (width - paddingLeft - paddingRight).coerceAtLeast(1)
+                val relativeX = (event.x - paddingLeft).coerceIn(0f, drawableWidth.toFloat())
+                val fraction = relativeX / drawableWidth.toFloat()
+                val frame = (fraction * totalFrames.toDouble()).roundToLong()
+                    .coerceIn(0L, totalFrames)
+                setPlayheadFrame(frame)
+                onSeekRequested?.invoke(frame)
+                performClick()
+                true
+            }
+            MotionEvent.ACTION_CANCEL -> true
+            else -> true
+        }
+    }
+
+    override fun performClick(): Boolean {
+        super.performClick()
+        return true
     }
 }

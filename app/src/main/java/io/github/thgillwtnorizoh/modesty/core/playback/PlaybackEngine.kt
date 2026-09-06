@@ -11,6 +11,7 @@ enum class PlaybackState {
 interface PlaybackEngine : AutoCloseable {
     val state: PlaybackState
     val playheadFrame: Long
+    val lastError: String?
 
     fun load(project: AudioProject)
     fun play(startFrame: Long = playheadFrame, endFrameExclusive: Long? = null)

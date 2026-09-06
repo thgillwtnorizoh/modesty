@@ -4,6 +4,8 @@ import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.OpenableColumns
 import android.view.Gravity
 import android.view.ViewGroup
@@ -14,8 +16,15 @@ import android.widget.ScrollView
 import android.widget.TextView
 import io.github.thgillwtnorizoh.modesty.core.io.WavDecoder
 import io.github.thgillwtnorizoh.modesty.core.io.WavEncoding
+import io.github.thgillwtnorizoh.modesty.core.model.AudioClip
+import io.github.thgillwtnorizoh.modesty.core.model.AudioProject
+import io.github.thgillwtnorizoh.modesty.core.model.AudioSource
+import io.github.thgillwtnorizoh.modesty.core.model.AudioTrack as ProjectTrack
+import io.github.thgillwtnorizoh.modesty.core.model.SourceRange
+import io.github.thgillwtnorizoh.modesty.core.playback.PlaybackState
 import io.github.thgillwtnorizoh.modesty.core.waveform.InMemoryWaveformCache
 import io.github.thgillwtnorizoh.modesty.core.waveform.WaveformPyramidBuilder
+import io.github.thgillwtnorizoh.modesty.platform.playback.AndroidSingleClipPlaybackEngine
 import io.github.thgillwtnorizoh.modesty.ui.WaveformView
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -25,15 +34,39 @@ class MainActivity : Activity() {
     private lateinit var statusText: TextView
     private lateinit var metadataText: TextView
     private lateinit var waveformView: WaveformView
+    private lateinit var playPauseButton: Button
+    private lateinit var stopButton: Button
+    private lateinit var timeText: TextView
+    private lateinit var playbackEngine: AndroidSingleClipPlaybackEngine
 
     private val worker = Executors.newSingleThreadExecutor()
     private val loadGeneration = AtomicInteger(0)
+    private val uiHandler = Handler(Looper.getMainLooper())
+
     private var selectedUri: String? = null
+    private var playbackLoaded = false
+    private var loadedTotalFrames = 0L
+    private var loadedSampleRate = 48_000
+    private var lastShownPlaybackError: String? = null
+
+    private val progressTicker = object : Runnable {
+        override fun run() {
+            if (::playbackEngine.isInitialized && !isDestroyed) updatePlaybackUi()
+            uiHandler.postDelayed(this, 33L)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         selectedUri = savedInstanceState?.getString(STATE_SELECTED_URI)
+        playbackEngine = AndroidSingleClipPlaybackEngine { source ->
+            WavDecoder {
+                contentResolver.openInputStream(Uri.parse(source.location))
+                    ?: error("Android could not reopen this document for playback")
+            }
+        }
         setContentView(buildContent())
+        uiHandler.post(progressTicker)
 
         selectedUri?.let { loadWav(Uri.parse(it)) }
     }
@@ -53,7 +86,7 @@ class MainActivity : Activity() {
         })
 
         root.addView(TextView(this).apply {
-            text = "Foundation brick 2\nReal WAV in. Real waveform out."
+            text = "Foundation brick 3\nWaveform has acquired vocal cords."
             textSize = 16f
             gravity = Gravity.CENTER
             setPadding(0, dp(6), 0, dp(18))
@@ -65,7 +98,7 @@ class MainActivity : Activity() {
         })
 
         statusText = TextView(this).apply {
-            text = "Choose a WAV file to inspect."
+            text = "Choose a WAV file to inspect and play."
             textSize = 15f
             gravity = Gravity.CENTER
             setPadding(0, dp(16), 0, dp(8))
@@ -75,9 +108,38 @@ class MainActivity : Activity() {
         metadataText = TextView(this).apply {
             textSize = 14f
             gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(12))
+            setPadding(0, 0, 0, dp(10))
         }
         root.addView(metadataText)
+
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        playPauseButton = Button(this).apply {
+            text = "Play"
+            isEnabled = false
+            setOnClickListener { togglePlayback() }
+        }
+        stopButton = Button(this).apply {
+            text = "Stop"
+            isEnabled = false
+            setOnClickListener {
+                playbackEngine.stop()
+                updatePlaybackUi()
+            }
+        }
+        controls.addView(playPauseButton)
+        controls.addView(stopButton)
+        root.addView(controls)
+
+        timeText = TextView(this).apply {
+            text = "0:00.000 / 0:00.000"
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setPadding(0, dp(4), 0, dp(10))
+        }
+        root.addView(timeText)
 
         waveformView = WaveformView(this).apply {
             setPadding(dp(4), dp(4), dp(4), dp(4))
@@ -85,11 +147,17 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dp(320),
             )
+            onSeekRequested = { frame ->
+                if (playbackLoaded) {
+                    playbackEngine.seekTo(frame)
+                    updatePlaybackUi()
+                }
+            }
         }
         root.addView(waveformView)
 
         root.addView(TextView(this).apply {
-            text = "Brick 2 WAV support: PCM 8/16/24/32-bit and IEEE float 32/64-bit.\nPlayback and editing are intentionally not here yet."
+            text = "Tap the waveform to seek. Brick 3 plays mono/stereo WAV at its native sample rate.\nEditing is still deliberately locked outside."
             textSize = 12f
             gravity = Gravity.CENTER
             setPadding(0, dp(12), 0, 0)
@@ -106,6 +174,22 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun togglePlayback() {
+        if (!playbackLoaded) return
+        when (playbackEngine.state) {
+            PlaybackState.PLAYING -> playbackEngine.pause()
+            PlaybackState.PAUSED,
+            PlaybackState.STOPPED,
+            -> {
+                if (playbackEngine.playheadFrame >= loadedTotalFrames) {
+                    playbackEngine.seekTo(0)
+                }
+                playbackEngine.play()
+            }
+        }
+        updatePlaybackUi()
+    }
+
     private fun chooseWav() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
@@ -119,7 +203,7 @@ class MainActivity : Activity() {
         startActivityForResult(intent, REQUEST_OPEN_WAV)
     }
 
-    @Deprecated("Legacy Activity callback keeps Brick 2 dependency-free")
+    @Deprecated("Legacy Activity callback keeps the foundation dependency-free")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != REQUEST_OPEN_WAV || resultCode != RESULT_OK) return
@@ -128,7 +212,7 @@ class MainActivity : Activity() {
         try {
             contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         } catch (_: SecurityException) {
-            // Some providers grant only temporary access. Brick 2 can still read the selected file now.
+            // Some providers grant only temporary access. The current selection still remains usable.
         }
 
         selectedUri = uri.toString()
@@ -137,9 +221,14 @@ class MainActivity : Activity() {
 
     private fun loadWav(uri: Uri) {
         val generation = loadGeneration.incrementAndGet()
+        playbackEngine.stop()
+        playbackLoaded = false
+        loadedTotalFrames = 0
+        lastShownPlaybackError = null
         statusText.text = "Reading WAV and building waveform…"
         metadataText.text = ""
         waveformView.clearWaveform()
+        updatePlaybackUi()
 
         worker.execute {
             try {
@@ -157,6 +246,35 @@ class MainActivity : Activity() {
                 val sourceId = uri.toString()
                 val cache = InMemoryWaveformCache().put(sourceId, pyramid)
                 val displayName = queryDisplayName(uri)
+                val source = AudioSource(
+                    id = sourceId,
+                    location = uri.toString(),
+                    sampleRate = metadata.info.sampleRate,
+                    channelCount = metadata.info.channelCount,
+                    totalFrames = metadata.info.totalFrames,
+                )
+                val project = AudioProject(
+                    id = "brick3-project",
+                    title = displayName,
+                    timelineRate = source.sampleRate,
+                    sources = mapOf(source.id to source),
+                    tracks = listOf(
+                        ProjectTrack(
+                            id = "track-1",
+                            name = displayName,
+                            clips = listOf(
+                                AudioClip(
+                                    id = "clip-1",
+                                    sourceId = source.id,
+                                    sourceRange = SourceRange(0, source.totalFrames),
+                                    timelineStartFrame = 0,
+                                ),
+                            ),
+                        ),
+                    ),
+                )
+                playbackEngine.load(project)
+
                 val details = buildString {
                     append(displayName)
                     append('\n')
@@ -175,7 +293,10 @@ class MainActivity : Activity() {
 
                 runOnUiThread {
                     if (generation != loadGeneration.get() || isDestroyed) return@runOnUiThread
-                    statusText.text = "Waveform ready."
+                    playbackLoaded = true
+                    loadedTotalFrames = pyramid.totalFrames
+                    loadedSampleRate = metadata.info.sampleRate.hz
+                    statusText.text = "Waveform ready. Playback armed."
                     metadataText.text = details
                     waveformView.setWaveform(
                         cache = cache,
@@ -183,15 +304,37 @@ class MainActivity : Activity() {
                         totalFrames = pyramid.totalFrames,
                         channelCount = pyramid.channelCount,
                     )
+                    updatePlaybackUi()
                 }
             } catch (error: Throwable) {
                 runOnUiThread {
                     if (generation != loadGeneration.get() || isDestroyed) return@runOnUiThread
-                    statusText.text = "Could not read this WAV."
+                    playbackLoaded = false
+                    statusText.text = "Could not read/play this WAV."
                     metadataText.text = error.message ?: error.javaClass.simpleName
                     waveformView.clearWaveform()
+                    updatePlaybackUi()
                 }
             }
+        }
+    }
+
+    private fun updatePlaybackUi() {
+        if (!::playPauseButton.isInitialized) return
+
+        playPauseButton.isEnabled = playbackLoaded
+        playPauseButton.text = if (playbackEngine.state == PlaybackState.PLAYING) "Pause" else "Play"
+        stopButton.isEnabled = playbackLoaded &&
+            (playbackEngine.state != PlaybackState.STOPPED || playbackEngine.playheadFrame > 0)
+
+        val frame = playbackEngine.playheadFrame.coerceIn(0L, loadedTotalFrames.coerceAtLeast(0L))
+        waveformView.setPlayheadFrame(frame)
+        timeText.text = "${formatDuration(frame, loadedSampleRate)} / ${formatDuration(loadedTotalFrames, loadedSampleRate)}"
+
+        val error = playbackEngine.lastError
+        if (error != null && error != lastShownPlaybackError) {
+            lastShownPlaybackError = error
+            statusText.text = "Playback error: $error"
         }
     }
 
@@ -206,13 +349,21 @@ class MainActivity : Activity() {
     }
 
     private fun formatDuration(frames: Long, sampleRate: Int): String {
-        val seconds = frames.toDouble() / sampleRate
+        if (sampleRate <= 0) return "0:00.000"
+        val seconds = frames.coerceAtLeast(0).toDouble() / sampleRate
         val minutesPart = (seconds / 60.0).toInt()
         val secondsPart = seconds - minutesPart * 60.0
         return String.format(Locale.US, "%d:%06.3f", minutesPart, secondsPart)
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
+
+    override fun onStop() {
+        if (::playbackEngine.isInitialized && playbackEngine.state == PlaybackState.PLAYING) {
+            playbackEngine.pause()
+        }
+        super.onStop()
+    }
 
     override fun onSaveInstanceState(outState: Bundle) {
         selectedUri?.let { outState.putString(STATE_SELECTED_URI, it) }
@@ -221,7 +372,9 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         loadGeneration.incrementAndGet()
+        uiHandler.removeCallbacks(progressTicker)
         worker.shutdownNow()
+        if (::playbackEngine.isInitialized) playbackEngine.close()
         super.onDestroy()
     }
 

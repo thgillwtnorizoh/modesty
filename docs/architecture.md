@@ -59,19 +59,39 @@ Brick #2 implements a streaming waveform pyramid. The base level records min, ma
 
 The current cache is in-memory. A later brick can persist or tile waveform data without changing the UI-facing cache contract.
 
+Brick #3 adds a playhead to the same `WaveformView`. The view knows only the current frame and maps a tap back to a requested source/timeline frame; it does not own playback.
+
+## Playback
+
+Brick #3 activates the `PlaybackEngine` boundary with `AndroidSingleClipPlaybackEngine`.
+
+The engine deliberately supports only one clip on one track, mono or stereo output, with the project timeline rate equal to the source rate. `SingleClipPlaybackPlan` performs the project/clip -> source-frame mapping in Android-free code and is unit tested. This limitation is intentional: it proves clocking, pause/resume, seeking, end-of-file behaviour, and decoder/output integration before a mixer or resampler is introduced.
+
+The reference backend streams float PCM from `AudioDecoder` into Android `AudioTrack`. The UI polls the engine's hardware-derived playhead and draws it over the waveform. Tapping the waveform seeks the engine; tapping while playing resumes from the requested frame.
+
+`AudioTrack` is not a permanent architectural dependency. Once the timeline behaviour is proven on devices, a later backend can use Oboe/AAudio without changing the project model or editor-facing `PlaybackEngine` contract.
+
+Current deliberate Brick #3 exclusions:
+
+- no mixed sample-rate playback / resampler
+- no multi-clip or multi-track mixer
+- no fades or clip gain in the playback path
+- no background playback policy
+- no audio-focus layer yet
+
 ## Android shell
 
-Android owns document selection and presentation only. WAV decoding and waveform analysis run on a worker thread; the activity receives completed metadata and a cache to draw. The custom `WaveformView` reads waveform buckets rather than raw PCM.
+Android owns document selection and presentation. WAV decoding and waveform analysis run on a worker thread. Playback owns a separate worker and never performs file decoding on the UI thread.
 
-## I/O and playback
+The activity pauses playback when it leaves the foreground and releases the playback engine when destroyed.
 
-Encoder and playback APIs remain contracts at Brick #2. Their implementations are intentionally deferred so platform/library choices do not leak into the project model.
+## I/O direction
 
-Likely later implementation direction:
+Encoder APIs remain contracts. Later implementation direction remains:
 
-- Oboe/AAudio for realtime playback
+- Oboe/AAudio for the mature realtime backend
 - native resampling/mixing engine
 - format-specific decoders where sensible
 - FFmpeg-backed compatibility layer for broad import/export
 
-These are implementation decisions, not project-model dependencies.
+These remain implementation choices behind stable project/editor boundaries.
