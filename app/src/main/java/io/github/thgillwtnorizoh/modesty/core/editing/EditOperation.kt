@@ -18,6 +18,10 @@ data class MoveClip(
 
     override fun applyTo(project: AudioProject): AudioProject {
         require(newTimelineStartFrame >= 0)
+        val bounds = project.clipMoveBounds(trackId, clipId)
+        require(newTimelineStartFrame in bounds.minimumStartFrame..bounds.maximumStartFrame) {
+            "Move would overlap or cross a neighbouring clip"
+        }
         return project.updateClip(trackId, clipId) { it.copy(timelineStartFrame = newTimelineStartFrame) }
     }
 }

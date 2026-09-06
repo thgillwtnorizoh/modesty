@@ -15,9 +15,11 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import io.github.thgillwtnorizoh.modesty.core.editing.DeleteTimelineRange
+import io.github.thgillwtnorizoh.modesty.core.editing.MoveClip
 import io.github.thgillwtnorizoh.modesty.core.editing.ProjectEditor
 import io.github.thgillwtnorizoh.modesty.core.editing.SplitTimelineRange
 import io.github.thgillwtnorizoh.modesty.core.editing.TrimClip
+import io.github.thgillwtnorizoh.modesty.core.editing.clipMoveBounds
 import io.github.thgillwtnorizoh.modesty.core.io.WavDecoder
 import io.github.thgillwtnorizoh.modesty.core.io.WavEncoding
 import io.github.thgillwtnorizoh.modesty.core.model.AudioClip
@@ -117,7 +119,7 @@ class MainActivity : Activity() {
         })
 
         root.addView(TextView(this).apply {
-            text = "Foundation brick 5\nOne waveform. Several pieces. Still one truth."
+            text = "Foundation brick 6\nThe clips have acquired wheels."
             textSize = 16f
             gravity = Gravity.CENTER
             setPadding(0, dp(6), 0, dp(18))
@@ -129,7 +131,7 @@ class MainActivity : Activity() {
         })
 
         statusText = TextView(this).apply {
-            text = "Choose a WAV file to inspect, play, split, and delete."
+            text = "Choose a WAV file to inspect, play, edit, and arrange."
             textSize = 15f
             gravity = Gravity.CENTER
             setPadding(0, dp(16), 0, dp(8))
@@ -189,11 +191,23 @@ class MainActivity : Activity() {
                 selectionTimelineEndFrameExclusive = end
                 updateSelectionUi()
             }
+            onClipMoveBoundsRequested = { clipId ->
+                val editor = projectEditor
+                if (editor == null) {
+                    0L..0L
+                } else {
+                    val bounds = editor.project.clipMoveBounds(TRACK_ID, clipId)
+                    bounds.minimumStartFrame..bounds.maximumStartFrame
+                }
+            }
+            onClipMoveCommitted = { clipId, newStart ->
+                moveClip(clipId, newStart)
+            }
         }
         root.addView(waveformView)
 
         selectionText = TextView(this).apply {
-            text = "Drag across the timeline to select a range. Tap to seek."
+            text = interactionHint()
             textSize = 13f
             gravity = Gravity.CENTER
             setPadding(0, dp(8), 0, dp(4))
@@ -243,7 +257,7 @@ class MainActivity : Activity() {
         root.addView(historyControls)
 
         root.addView(TextView(this).apply {
-            text = "Split creates clip boundaries without rewriting audio. Delete leaves a silence gap; ripple delete comes later.\nThe original WAV remains untouched."
+            text = "Drag the C# strip at the top of a clip to move it. Neighbouring clips are hard walls for now, so clips cannot overlap or cross.\nThe original WAV remains untouched."
             textSize = 12f
             gravity = Gravity.CENTER
             setPadding(0, dp(12), 0, 0)
@@ -368,6 +382,24 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun moveClip(clipId: String, requestedStartFrame: Long) {
+        val editor = projectEditor ?: return
+        val project = editor.project
+        val clip = project.tracks.single().clips.firstOrNull { it.id == clipId } ?: return
+        val bounds = project.clipMoveBounds(TRACK_ID, clipId)
+        val target = bounds.clamp(requestedStartFrame)
+        if (target == clip.timelineStartFrame) return
+
+        playbackEngine.stop()
+        try {
+            editor.apply(MoveClip(TRACK_ID, clipId, target))
+            bindEditorProject("Moved clip nondestructively. One drag is one undo step.")
+        } catch (error: Throwable) {
+            statusText.text = "Move failed: ${error.message ?: error.javaClass.simpleName}"
+            bindEditorProject(statusText.text.toString())
+        }
+    }
+
     private fun undoEdit() {
         val editor = projectEditor ?: return
         if (!editor.undo()) return
@@ -455,7 +487,7 @@ class MainActivity : Activity() {
                     totalFrames = metadata.info.totalFrames,
                 )
                 val baseProject = AudioProject(
-                    id = "brick5-project",
+                    id = "brick6-project",
                     title = displayName,
                     timelineRate = source.sampleRate,
                     sources = mapOf(source.id to source),
@@ -501,7 +533,7 @@ class MainActivity : Activity() {
                     metadataText.text = details
                     projectEditor = ProjectEditor(restoredProject)
                     clearRestoredClips()
-                    bindEditorProject("Waveform ready. Multi-clip timeline armed.")
+                    bindEditorProject("Waveform ready. Clip movement armed.")
                 }
             } catch (error: Throwable) {
                 runOnUiThread {
@@ -579,20 +611,10 @@ class MainActivity : Activity() {
             timelineWindowEndFrameExclusive = loadedSourceTotalFrames.coerceAtLeast(1)
         }
 
-        val displayClips = clips.map { clip ->
-            TimelineWaveformClip(
-                id = clip.id,
-                sourceId = clip.sourceId,
-                sourceStartFrame = clip.sourceRange.startFrame,
-                sourceEndFrameExclusive = clip.sourceRange.endFrameExclusive,
-                timelineStartFrame = clip.timelineStartFrame,
-                timelineEndFrameExclusive = project.clipTimelineEndFrameExclusive(clip),
-            )
-        }
         waveformView.setTimeline(
             cache = cache,
             channelCount = loadedChannelCount,
-            clips = displayClips,
+            clips = timelineWaveformClips(project),
             visibleTimelineStartFrame = timelineWindowStartFrame,
             visibleTimelineEndFrameExclusive = timelineWindowEndFrameExclusive,
         )
@@ -612,6 +634,18 @@ class MainActivity : Activity() {
         updatePlaybackUi()
     }
 
+    private fun timelineWaveformClips(project: AudioProject): List<TimelineWaveformClip> =
+        project.tracks.single().clips.sortedBy { it.timelineStartFrame }.map { clip ->
+            TimelineWaveformClip(
+                id = clip.id,
+                sourceId = clip.sourceId,
+                sourceStartFrame = clip.sourceRange.startFrame,
+                sourceEndFrameExclusive = clip.sourceRange.endFrameExclusive,
+                timelineStartFrame = clip.timelineStartFrame,
+                timelineEndFrameExclusive = project.clipTimelineEndFrameExclusive(clip),
+            )
+        }
+
     private fun updateSelectionUi() {
         if (!::selectionText.isInitialized || !::trimButton.isInitialized) return
         val editor = projectEditor
@@ -619,7 +653,7 @@ class MainActivity : Activity() {
         val end = selectionTimelineEndFrameExclusive
 
         if (editor == null || start == null || end == null || end <= start) {
-            selectionText.text = "Drag across the timeline to select a range. Tap to seek."
+            selectionText.text = interactionHint()
             trimButton.isEnabled = false
             splitButton.isEnabled = false
             deleteButton.isEnabled = false
@@ -712,6 +746,9 @@ class MainActivity : Activity() {
             val clipEnd = project.clipTimelineEndFrameExclusive(clip)
             maxOf(start, clipStart) < minOf(end, clipEnd)
         }
+
+    private fun interactionHint(): String =
+        "Drag the waveform body to select. Drag a C# header to move that clip. Tap to seek."
 
     private fun queryDisplayName(uri: Uri): String {
         contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->

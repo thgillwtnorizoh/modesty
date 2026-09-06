@@ -17,30 +17,30 @@ The foundation is being built and tested one brick at a time:
 - multi-resolution waveform cache
 - real WAV decoding
 - hardware-derived playback playhead
-- non-overlapping multi-clip timeline playback
+- non-overlapping multi-clip timeline with real silence gaps
 - Android shell kept dependency-light
 
 The project currently targets `compileSdk 36` / `targetSdk 36` and uses JDK 17. This is intentional while the core is being established so CI does not depend on API 37 tooling.
 
 ## Current brick
 
-**Brick #5: split + delete + multi-clip timeline**
+**Brick #6: horizontal clip movement**
 
 The Android shell can now:
 
 - pick and decode a real WAV
 - build and render its waveform pyramid
 - play/pause/stop through Android `AudioTrack`
-- tap the timeline to seek
-- drag across the timeline to create a selection
-- trim a single clip nondestructively
-- split clips at both boundaries of a selection
-- delete audio under a timeline selection without touching the source file
-- render and play multiple non-overlapping clips on one track
-- render deleted regions as timeline gaps and play those gaps as silence
-- undo and redo timeline edits
+- tap the waveform to seek
+- drag the waveform body to create a selection
+- trim, split, and non-ripple delete without modifying the WAV
+- render and play multiple sequential clips plus silence gaps
+- drag the `C#` strip at the top of a clip to move it horizontally
+- preview movement before release
+- prevent clips from overlapping or crossing neighbours
+- undo and redo a completed move as one edit
 
-Split and delete are metadata edits. The source WAV and its waveform pyramid remain immutable. Deleting a range currently leaves silence in the timeline; ripple delete is intentionally a later operation.
+Clip movement currently stays on one track. Neighbouring clips are hard walls until the project gains a real mixer/overlap model. The waveform-body selection gesture and vertical page scrolling remain separate from the clip-header movement gesture.
 
 Currently supported WAV sample encodings:
 
@@ -48,7 +48,7 @@ Currently supported WAV sample encodings:
 - IEEE float: 32 and 64-bit
 - WAVE_FORMAT_EXTENSIBLE when its sub-format is PCM or IEEE float
 
-Playback still deliberately supports one track, mono/stereo output, non-overlapping clips, and sources whose sample rate matches the project timeline rate. Mixing, resampling, effects UI, moving clips, and export come later.
+Playback is still intentionally limited to one mono/stereo track at its native sample rate. Mixing, resampling, effects UI, and export come later.
 
 ## First useful target
 
