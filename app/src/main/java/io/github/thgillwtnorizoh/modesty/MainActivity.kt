@@ -26,9 +26,11 @@ import io.github.thgillwtnorizoh.modesty.core.editing.MoveClip
 import io.github.thgillwtnorizoh.modesty.core.editing.ProjectEditor
 import io.github.thgillwtnorizoh.modesty.core.editing.SplitTimelineRange
 import io.github.thgillwtnorizoh.modesty.core.editing.TrimClip
+import io.github.thgillwtnorizoh.modesty.core.editing.clipContainingTimelineRange
 import io.github.thgillwtnorizoh.modesty.core.editing.clipMoveBounds
 import io.github.thgillwtnorizoh.modesty.core.io.Pcm16WavEncoder
 import io.github.thgillwtnorizoh.modesty.core.io.WavDecoder
+import io.github.thgillwtnorizoh.modesty.core.io.WavEncoding
 import io.github.thgillwtnorizoh.modesty.core.model.AudioClip
 import io.github.thgillwtnorizoh.modesty.core.model.AudioProject
 import io.github.thgillwtnorizoh.modesty.core.model.AudioSource
@@ -74,6 +76,7 @@ class MainActivity : Activity() {
 
     private var projectEditor: ProjectEditor? = null
     private var waveformCache: InMemoryWaveformCache? = null
+    private val sourceFormats = linkedMapOf<String, SourceFormatInfo>()
     private var playbackLoaded = false
     private var exportInProgress = false
     private var importInProgress = false
@@ -105,17 +108,29 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         restoreBundleFields(savedInstanceState)
+        val retained = lastNonConfigurationInstance as? RetainedSession
 
-        playbackEngine = AndroidTimelinePlaybackEngine { source ->
-            WavDecoder {
-                contentResolver.openInputStream(Uri.parse(source.location))
-                    ?: error("Android could not reopen this document for playback")
-            }
-        }
+        playbackEngine = AndroidTimelinePlaybackEngine { source -> decoderFor(source) }
         setContentView(buildContent())
         uiHandler.post(progressTicker)
 
-        if (!restoredSourceIds.isNullOrEmpty() && !restoredSourceLocations.isNullOrEmpty()) {
+        if (retained != null) {
+            projectEditor = retained.editor
+            waveformCache = retained.waveformCache
+            sourceFormats.clear()
+            sourceFormats.putAll(retained.sourceFormats)
+            val project = retained.editor.project
+            loadedSampleRate = project.timelineRate.hz
+            loadedChannelCount = project.sources.values.firstOrNull()?.channelCount ?: 0
+            loadedSourceTotalFrames = retained.loadedSourceTotalFrames
+            clearRestoredState()
+            bindEditorProject(
+                statusMessage = "Restored live editor session after rotation. Undo/Redo history preserved.",
+                preservedSelection = retained.selectionStart?.let { start ->
+                    retained.selectionEnd?.let { end -> start to end }
+                },
+            )
+        } else if (!restoredSourceIds.isNullOrEmpty() && !restoredSourceLocations.isNullOrEmpty()) {
             loadRestoredProject()
         }
     }
@@ -146,7 +161,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
         })
         root.addView(TextView(this).apply {
-            text = "Foundation brick 9\nThe bento has multiple ingredients."
+            text = "Foundation brick 9.1\nSeal the cracks before the next floor."
             textSize = 16f
             gravity = Gravity.CENTER
             setPadding(0, dp(6), 0, dp(18))
@@ -308,7 +323,7 @@ class MainActivity : Activity() {
         root.addView(historyControls)
 
         root.addView(TextView(this).apply {
-            text = "Brick #9 appends matching WAV sources on the same non-overlapping track. Imported WAVs must currently match sample rate and channel count. Playback, edits, waveform drawing, and export all use the same project sources."
+            text = "Brick #9.1 restores per-source WAV format details, allows Trim inside any one clip, and keeps live undo/redo history across configuration rotation. Process-death restoration still restores current project state without promising edit history."
             textSize = 12f
             gravity = Gravity.CENTER
             setPadding(0, dp(12), 0, 0)
@@ -429,10 +444,8 @@ class MainActivity : Activity() {
         val start = selectionTimelineStartFrame ?: return
         val end = selectionTimelineEndFrameExclusive ?: return
         val project = editor.project
-        val clip = project.tracks.single().clips.singleOrNull() ?: return
+        val clip = project.clipContainingTimelineRange(TRACK_ID, start, end) ?: return
         val clipStart = clip.timelineStartFrame
-        val clipEnd = project.clipTimelineEndFrameExclusive(clip)
-        if (start < clipStart || end > clipEnd || end <= start) return
 
         val sourceStart = clip.sourceRange.startFrame +
             project.projectFramesToSourceFrames(clip.sourceId, start - clipStart)
@@ -450,7 +463,7 @@ class MainActivity : Activity() {
                     newSourceEndFrameExclusive = sourceEnd.coerceAtMost(clip.sourceRange.endFrameExclusive),
                 ),
             )
-            bindEditorProject("Trimmed nondestructively to ${formatDuration(end - start, loadedSampleRate)}.")
+            bindEditorProject("Trimmed that clip nondestructively to ${formatDuration(end - start, loadedSampleRate)}.")
         } catch (error: Throwable) {
             statusText.text = "Trim failed: ${error.message ?: error.javaClass.simpleName}"
         }
@@ -660,7 +673,7 @@ class MainActivity : Activity() {
         worker.execute {
             try {
                 val loaded = decodeSource(uri, newSourceId())
-                val displayName = queryDisplayName(uri)
+                val displayName = loaded.format.displayName
                 val source = loaded.source
                 val cache = InMemoryWaveformCache().put(source.id, loaded.pyramid)
                 val project = AudioProject(
@@ -686,6 +699,8 @@ class MainActivity : Activity() {
 
                 runOnUiThread {
                     if (generation != loadGeneration.get() || isDestroyed) return@runOnUiThread
+                    sourceFormats.clear()
+                    sourceFormats[source.id] = loaded.format
                     installLoadedProject(project, cache)
                     clearRestoredState()
                     bindEditorProject("Waveform ready. Add WAV can bring in source #2.")
@@ -701,8 +716,7 @@ class MainActivity : Activity() {
         if (importInProgress || exportInProgress) return
         val generation = loadGeneration.get()
         val expectedRate = initialProject.timelineRate
-        val expectedChannels = initialProject.sources.values.firstOrNull()?.channelCount
-            ?: return
+        val expectedChannels = initialProject.sources.values.firstOrNull()?.channelCount ?: return
 
         importInProgress = true
         updateFileActionButtons()
@@ -718,7 +732,7 @@ class MainActivity : Activity() {
                 require(loaded.source.channelCount == expectedChannels) {
                     "That WAV has ${loaded.source.channelCount} channels; this project has $expectedChannels. Channel conversion comes later."
                 }
-                val displayName = queryDisplayName(uri)
+                val displayName = loaded.format.displayName
 
                 runOnUiThread {
                     if (generation != loadGeneration.get() || isDestroyed) return@runOnUiThread
@@ -742,6 +756,7 @@ class MainActivity : Activity() {
                     )
                     waveformCache?.put(loaded.source.id, loaded.pyramid)
                         ?: error("Waveform cache disappeared during import")
+                    sourceFormats[loaded.source.id] = loaded.format
                     editor.apply(AddSourceClip(TRACK_ID, loaded.source, clip))
                     loadedSourceTotalFrames = maxOf(loadedSourceTotalFrames, loaded.source.totalFrames)
                     bindEditorProject(
@@ -780,6 +795,7 @@ class MainActivity : Activity() {
             try {
                 val cache = InMemoryWaveformCache()
                 val sources = linkedMapOf<String, AudioSource>()
+                val formats = linkedMapOf<String, SourceFormatInfo>()
                 var expectedRate: Int? = null
                 var expectedChannels: Int? = null
 
@@ -796,11 +812,12 @@ class MainActivity : Activity() {
                         }
                     }
                     sources[source.id] = source
+                    formats[source.id] = loaded.format
                     cache.put(source.id, loaded.pyramid)
                 }
 
                 val firstSource = sources.values.first()
-                val title = queryDisplayName(Uri.parse(firstSource.location))
+                val title = formats[firstSource.id]?.displayName ?: "Restored WAV"
                 val clips = restoreClips(sources)
                 val project = AudioProject(
                     id = "brick9-project",
@@ -812,9 +829,13 @@ class MainActivity : Activity() {
 
                 runOnUiThread {
                     if (generation != loadGeneration.get() || isDestroyed) return@runOnUiThread
+                    sourceFormats.clear()
+                    sourceFormats.putAll(formats)
                     installLoadedProject(project, cache)
                     clearRestoredState()
-                    bindEditorProject("Restored ${project.sources.size} source${if (project.sources.size == 1) "" else "s"} and ${clips.size} clip${if (clips.size == 1) "" else "s"}.")
+                    bindEditorProject(
+                        "Restored ${project.sources.size} source${if (project.sources.size == 1) "" else "s"} and ${clips.size} clip${if (clips.size == 1) "" else "s"}. Process-death restore does not include edit history.",
+                    )
                 }
             } catch (error: Throwable) {
                 showLoadFailure(generation, error)
@@ -853,9 +874,25 @@ class MainActivity : Activity() {
         }.sortedBy { it.timelineStartFrame }
     }
 
+    private data class SourceFormatInfo(
+        val displayName: String,
+        val bitsPerSample: Int,
+        val encodingLabel: String,
+    )
+
     private data class LoadedSource(
         val source: AudioSource,
         val pyramid: WaveformPyramid,
+        val format: SourceFormatInfo,
+    )
+
+    private data class RetainedSession(
+        val editor: ProjectEditor,
+        val waveformCache: InMemoryWaveformCache,
+        val sourceFormats: Map<String, SourceFormatInfo>,
+        val loadedSourceTotalFrames: Long,
+        val selectionStart: Long?,
+        val selectionEnd: Long?,
     )
 
     private fun decodeSource(uri: Uri, sourceId: String): LoadedSource {
@@ -868,6 +905,14 @@ class MainActivity : Activity() {
         } finally {
             decoder.close()
         }
+        val format = SourceFormatInfo(
+            displayName = queryDisplayName(uri),
+            bitsPerSample = metadata.bitsPerSample,
+            encodingLabel = when (metadata.encoding) {
+                WavEncoding.PCM_INTEGER -> "PCM"
+                WavEncoding.IEEE_FLOAT -> "float"
+            },
+        )
         return LoadedSource(
             source = AudioSource(
                 id = sourceId,
@@ -877,6 +922,7 @@ class MainActivity : Activity() {
                 totalFrames = metadata.info.totalFrames,
             ),
             pyramid = pyramid,
+            format = format,
         )
     }
 
@@ -889,6 +935,7 @@ class MainActivity : Activity() {
         playbackEngine.stop()
         projectEditor = null
         waveformCache = null
+        sourceFormats.clear()
         playbackLoaded = false
         exportInProgress = false
         importInProgress = false
@@ -921,6 +968,7 @@ class MainActivity : Activity() {
             if (generation != loadGeneration.get() || isDestroyed) return@runOnUiThread
             projectEditor = null
             waveformCache = null
+            sourceFormats.clear()
             playbackLoaded = false
             statusText.text = "Could not load project audio."
             metadataText.text = error.message ?: error.javaClass.simpleName
@@ -997,25 +1045,37 @@ class MainActivity : Activity() {
         }
 
     private fun updateMetadataSummary(project: AudioProject) {
-        val sourceCount = project.sources.size
-        val channelCount = project.sources.values.firstOrNull()?.channelCount ?: 0
-        val channelText = when (channelCount) {
-            1 -> "mono"
-            2 -> "stereo"
-            else -> "$channelCount channels"
-        }
+        val clips = project.tracks.single().clips
         metadataText.text = buildString {
             append(project.title)
             append('\n')
-            append(sourceCount)
-            append(if (sourceCount == 1) " source • " else " sources • ")
-            append(project.timelineRate.hz)
-            append(" Hz • ")
-            append(channelText)
-            append('\n')
-            append(project.tracks.single().clips.size)
-            append(" timeline clip")
-            if (project.tracks.single().clips.size != 1) append('s')
+            append(project.sources.size)
+            append(if (project.sources.size == 1) " source • " else " sources • ")
+            append(clips.size)
+            append(if (clips.size == 1) " timeline clip" else " timeline clips")
+
+            project.sources.values.forEachIndexed { index, source ->
+                val format = sourceFormats[source.id]
+                val channelText = when (source.channelCount) {
+                    1 -> "mono"
+                    2 -> "stereo"
+                    else -> "${source.channelCount} channels"
+                }
+                append('\n')
+                append(('A'.code + index).toChar())
+                append(" • ")
+                append(format?.displayName ?: "Source ${index + 1}")
+                append(" • ")
+                append(source.sampleRate.hz)
+                append(" Hz • ")
+                append(channelText)
+                if (format != null) {
+                    append(" • ")
+                    append(format.bitsPerSample)
+                    append("-bit ")
+                    append(format.encodingLabel)
+                }
+            }
         }
     }
 
@@ -1059,9 +1119,9 @@ class MainActivity : Activity() {
 
         val project = editor.project
         val clips = project.tracks.single().clips
-        val single = clips.singleOrNull()
-        trimButton.isEnabled = single != null && selectionInsideClip(project, single, start, end) &&
-            (start != single.timelineStartFrame || end != project.clipTimelineEndFrameExclusive(single))
+        val trimTarget = project.clipContainingTimelineRange(TRACK_ID, start, end)
+        trimButton.isEnabled = trimTarget != null &&
+            (start != trimTarget.timelineStartFrame || end != project.clipTimelineEndFrameExclusive(trimTarget))
         splitButton.isEnabled = clips.isNotEmpty() && selectionCanCreateSplit(project, start, end)
         deleteButton.isEnabled = selectionOverlapsAudio(project, start, end)
         amplifyButton.isEnabled = selectionOverlapsAudio(project, start, end)
@@ -1114,9 +1174,6 @@ class MainActivity : Activity() {
             statusText.text = "Playback error: $error"
         }
     }
-
-    private fun selectionInsideClip(project: AudioProject, clip: AudioClip, start: Long, end: Long): Boolean =
-        start >= clip.timelineStartFrame && end <= project.clipTimelineEndFrameExclusive(clip)
 
     private fun selectionCanCreateSplit(project: AudioProject, start: Long, end: Long): Boolean =
         project.tracks.single().clips.any { clip ->
@@ -1197,6 +1254,19 @@ class MainActivity : Activity() {
             outState.putFloatArray(STATE_CLIP_GAINS, clips.map { it.gain }.toFloatArray())
         }
         super.onSaveInstanceState(outState)
+    }
+
+    override fun onRetainNonConfigurationInstance(): Any? {
+        val editor = projectEditor ?: return null
+        val cache = waveformCache ?: return null
+        return RetainedSession(
+            editor = editor,
+            waveformCache = cache,
+            sourceFormats = LinkedHashMap(sourceFormats),
+            loadedSourceTotalFrames = loadedSourceTotalFrames,
+            selectionStart = selectionTimelineStartFrame,
+            selectionEnd = selectionTimelineEndFrameExclusive,
+        )
     }
 
     override fun onDestroy() {
