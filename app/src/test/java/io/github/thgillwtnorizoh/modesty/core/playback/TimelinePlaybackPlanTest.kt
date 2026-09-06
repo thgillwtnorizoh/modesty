@@ -42,13 +42,13 @@ class TimelinePlaybackPlanTest {
 
         val plan = TimelinePlaybackPlan.from(project)
 
-        assertEquals(0, plan.timelineStartFrame)
-        assertEquals(1_000, plan.timelineEndFrameExclusive)
+        assertEquals(0L, plan.timelineStartFrame)
+        assertEquals(1_000L, plan.timelineEndFrameExclusive)
         assertEquals("left", plan.segmentAt(100)?.clip?.id)
         assertNull(plan.segmentAt(500))
-        assertEquals(700, plan.nextSegmentStartAfter(500))
+        assertEquals(700L, plan.nextSegmentStartAfter(500))
         assertEquals("right", plan.segmentAt(700)?.clip?.id)
-        assertEquals(850, plan.segmentAt(850)?.sourceFrameForTimeline(project, 850))
+        assertEquals(850L, plan.segmentAt(850)?.sourceFrameForTimeline(project, 850))
     }
 
     @Test
