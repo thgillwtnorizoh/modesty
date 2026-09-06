@@ -8,6 +8,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import io.github.thgillwtnorizoh.modesty.core.waveform.WaveformCache
+import io.github.thgillwtnorizoh.modesty.core.waveform.scaleWaveformAmplitude
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
@@ -18,6 +19,7 @@ data class TimelineWaveformClip(
     val sourceEndFrameExclusive: Long,
     val timelineStartFrame: Long,
     val timelineEndFrameExclusive: Long,
+    val gain: Float = 1f,
 ) {
     init {
         require(id.isNotBlank())
@@ -26,6 +28,7 @@ data class TimelineWaveformClip(
         require(sourceEndFrameExclusive > sourceStartFrame)
         require(timelineStartFrame >= 0)
         require(timelineEndFrameExclusive > timelineStartFrame)
+        require(gain >= 0f && gain.isFinite())
     }
 }
 
@@ -271,8 +274,8 @@ class WaveformView(context: Context) : View(context) {
             val xStep = (right - left) / buckets.size
             buckets.forEachIndexed { index, bucket ->
                 val x = left + (index + 0.5f) * xStep
-                val min = bucket.min.coerceIn(-1f, 1f)
-                val max = bucket.max.coerceIn(-1f, 1f)
+                val min = scaleWaveformAmplitude(bucket.min, clip.gain)
+                val max = scaleWaveformAmplitude(bucket.max, clip.gain)
                 val yTop = centerY - max * amplitudeHeight
                 val yBottom = centerY - min * amplitudeHeight
                 canvas.drawLine(x, yTop, x, yBottom, waveformPaint)

@@ -13,4 +13,10 @@ class GainMathTest {
         assertEquals(0.5f, halved, 0.001f)
         assertEquals(6.0206f, linearGainToDecibels(2f), 0.001f)
     }
+
+    @Test
+    fun finiteValuesAboveOldUiCapRemainValid() {
+        assertEquals(100f, decibelsToLinearGain(40f), 0.001f)
+        assertEquals(0.01f, decibelsToLinearGain(-40f), 0.0001f)
+    }
 }

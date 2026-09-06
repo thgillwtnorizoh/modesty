@@ -20,13 +20,14 @@ The foundation is being built and tested one brick at a time:
 - non-overlapping multi-clip timeline with real silence gaps
 - horizontal clip movement with explicit overlap constraints
 - per-clip gain routed through the shared `GainProcessor`
+- gain-aware waveform display without rebuilding the source cache
 - Android shell kept dependency-light
 
 The project currently targets `compileSdk 36` / `targetSdk 36` and uses JDK 17. This is intentional while the core is being established so CI does not depend on API 37 tooling.
 
 ## Current brick
 
-**Brick #7: gain / amplify + audible preview**
+**Brick #7.1: gain-aware waveform + uncapped amplify UI**
 
 The Android shell can now:
 
@@ -42,12 +43,14 @@ The Android shell can now:
 - enter a dB value and amplify/attenuate any selected timeline range
 - split gain boundaries automatically so only selected audio changes
 - preview only the selected range after applying gain
+- redraw waveform amplitude immediately from clip gain while keeping the cached source waveform untouched
+- accept any finite dB input that converts to a finite internal gain instead of imposing an arbitrary per-apply cap
 - undo and redo amplification as one edit
 - preserve clip gain across Android configuration recreation
 
 Amplify does not rewrite PCM. It converts the UI dB value to a linear multiplier, stores the result in clip metadata, then playback routes decoded float PCM through the same UI-independent `GainProcessor` established in the foundation. Quick Amplify and the later full editor therefore share the same path.
 
-Brick #7 accepts -60 dB through +24 dB in the Android UI. Positive gain is currently allowed to hard-clip at output when the source has insufficient headroom. Peak scanning and clipping-aware amplification policy come later; the DSP and editing layers remain separate from that policy.
+The waveform renderer now multiplies cached source peaks by clip gain at draw time and clamps the visual result to full scale, matching the current playback clamp. Large positive gain is allowed but warned because it can hard-clip when the source has insufficient headroom. Values beyond the finite range representable by the engine are rejected instead of producing invalid gain metadata.
 
 Currently supported WAV sample encodings:
 

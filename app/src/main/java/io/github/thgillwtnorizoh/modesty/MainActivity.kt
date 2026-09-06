@@ -128,7 +128,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
         })
         root.addView(TextView(this).apply {
-            text = "Foundation brick 7\nThe boy can roar now."
+            text = "Foundation brick 7.1\nGain finally shows its work."
             textSize = 16f
             gravity = Gravity.CENTER
             setPadding(0, dp(6), 0, dp(18))
@@ -271,7 +271,7 @@ class MainActivity : Activity() {
         root.addView(historyControls)
 
         root.addView(TextView(this).apply {
-            text = "Amplify changes clip metadata, not the source WAV. Apply & Preview plays only the selected range. Positive gain can hard-clip if the source has no headroom."
+            text = "The source waveform cache stays untouched; clip gain is applied while drawing and while playing. Large positive gain can hard-clip, so preview at a comfortable device volume."
             textSize = 12f
             gravity = Gravity.CENTER
             setPadding(0, dp(12), 0, 0)
@@ -320,7 +320,10 @@ class MainActivity : Activity() {
 
         AlertDialog.Builder(this)
             .setTitle("Amplify selection")
-            .setMessage("Enter gain in dB. Brick #7 accepts -60 to +24 dB. Positive gain may clip.")
+            .setMessage(
+                "Enter a finite gain in dB. There is no arbitrary per-apply cap. " +
+                    "Very large positive gain will likely hard-clip.",
+            )
             .setView(input)
             .setNegativeButton("Cancel", null)
             .setNeutralButton("Apply") { _, _ -> applyGainFromText(input.text.toString(), preview = false) }
@@ -330,18 +333,24 @@ class MainActivity : Activity() {
 
     private fun applyGainFromText(text: String, preview: Boolean) {
         val decibels = text.trim().toFloatOrNull()
-        if (decibels == null || !decibels.isFinite() || decibels !in MIN_GAIN_DB..MAX_GAIN_DB) {
-            statusText.text = "Amplify needs a number from ${MIN_GAIN_DB.toInt()} to +${MAX_GAIN_DB.toInt()} dB."
+        if (decibels == null || !decibels.isFinite()) {
+            statusText.text = "Amplify needs a finite dB number."
             return
         }
         if (abs(decibels) < 0.0001f) {
             statusText.text = "0 dB changes nothing, which is impressively accurate but not very exciting."
             return
         }
-        amplifySelection(decibels, preview)
+
+        val gainMultiplier = runCatching { decibelsToLinearGain(decibels) }
+            .getOrElse {
+                statusText.text = "That dB value is beyond the finite gain range the engine can represent."
+                return
+            }
+        amplifySelection(decibels, gainMultiplier, preview)
     }
 
-    private fun amplifySelection(decibels: Float, preview: Boolean) {
+    private fun amplifySelection(decibels: Float, gainMultiplier: Float, preview: Boolean) {
         val editor = projectEditor ?: return
         val start = selectionTimelineStartFrame ?: return
         val end = selectionTimelineEndFrameExclusive ?: return
@@ -354,12 +363,17 @@ class MainActivity : Activity() {
                     trackId = TRACK_ID,
                     startTimelineFrame = start,
                     endTimelineFrameExclusive = end,
-                    gainMultiplier = decibelsToLinearGain(decibels),
+                    gainMultiplier = gainMultiplier,
                     rightClipIdAtStart = newClipId(),
                     rightClipIdAtEnd = newClipId(),
                 ),
             )
-            val warning = if (decibels > 0f) " Positive gain may clip." else ""
+            val warning = when {
+                decibels > HIGH_GAIN_WARNING_DB ->
+                    " Extreme positive gain will likely hard-clip; preview at a comfortable device volume."
+                decibels > 0f -> " Positive gain may clip."
+                else -> ""
+            }
             bindEditorProject(
                 statusMessage = "Applied ${formatDb(decibels)} nondestructively.$warning",
                 preservedSelection = start to end,
@@ -603,7 +617,7 @@ class MainActivity : Activity() {
                     metadataText.text = details
                     projectEditor = ProjectEditor(restoredProject)
                     clearRestoredClips()
-                    bindEditorProject("Waveform ready. Gain stage armed.")
+                    bindEditorProject("Waveform ready. Gain-aware display armed.")
                 }
             } catch (error: Throwable) {
                 runOnUiThread {
@@ -716,6 +730,7 @@ class MainActivity : Activity() {
                 sourceEndFrameExclusive = clip.sourceRange.endFrameExclusive,
                 timelineStartFrame = clip.timelineStartFrame,
                 timelineEndFrameExclusive = project.clipTimelineEndFrameExclusive(clip),
+                gain = clip.gain,
             )
         }
 
@@ -896,7 +911,6 @@ class MainActivity : Activity() {
         private const val STATE_CLIP_GAINS = "clip_gains"
         private const val TRACK_ID = "track-1"
         private const val INITIAL_CLIP_ID = "clip-1"
-        private const val MIN_GAIN_DB = -60f
-        private const val MAX_GAIN_DB = 24f
+        private const val HIGH_GAIN_WARNING_DB = 24f
     }
 }
