@@ -21,13 +21,15 @@ The foundation is being built and tested one brick at a time:
 - horizontal clip movement with explicit overlap constraints
 - per-clip gain routed through the shared `GainProcessor`
 - gain-aware waveform display without rebuilding the source cache
+- offline timeline renderer shared with export
+- seekless PCM16 RIFF/WAVE encoder for Android document providers
 - Android shell kept dependency-light
 
 The project currently targets `compileSdk 36` / `targetSdk 36` and uses JDK 17. This is intentional while the core is being established so CI does not depend on API 37 tooling.
 
 ## Current brick
 
-**Brick #7.1: gain-aware waveform + uncapped amplify UI**
+**Brick #8: WAV export / offline render**
 
 The Android shell can now:
 
@@ -41,28 +43,31 @@ The Android shell can now:
 - drag the `C#` strip at the top of a clip to move it horizontally
 - prevent clips from overlapping or crossing neighbours
 - enter a dB value and amplify/attenuate any selected timeline range
-- split gain boundaries automatically so only selected audio changes
 - preview only the selected range after applying gain
 - redraw waveform amplitude immediately from clip gain while keeping the cached source waveform untouched
-- accept any finite dB input that converts to a finite internal gain instead of imposing an arbitrary per-apply cap
-- undo and redo amplification as one edit
-- preserve clip gain across Android configuration recreation
+- accept finite dB input without an arbitrary per-apply cap
+- undo and redo edits
+- export the current edited timeline through Android's document picker
 
-Amplify does not rewrite PCM. It converts the UI dB value to a linear multiplier, stores the result in clip metadata, then playback routes decoded float PCM through the same UI-independent `GainProcessor` established in the foundation. Quick Amplify and the later full editor therefore share the same path.
+Export uses a UI-independent `TimelineRenderer` that walks the same clip positions, source ranges, silence gaps, and per-clip gain used by playback. The Activity only chooses the destination URI and reports progress; it does not know how to render samples or construct a WAV file.
 
-The waveform renderer now multiplies cached source peaks by clip gain at draw time and clamps the visual result to full scale, matching the current playback clamp. Large positive gain is allowed but warned because it can hard-clip when the source has insufficient headroom. Values beyond the finite range representable by the engine are rejected instead of producing invalid gain metadata.
+Brick #8 exports standard 16-bit PCM WAV while preserving the current project sample rate and mono/stereo layout. Because the complete frame count is known before rendering, `Pcm16WavEncoder` writes the final RIFF header up front and works with document-provider streams that cannot seek. Classic RIFF's 4 GiB container limit is enforced; RF64 comes later.
 
-Currently supported WAV sample encodings:
+The exported file spans from the first audible timeline frame through the final clip, matching the current playback/preview window. Silence gaps between clips are rendered as actual zero samples. Gain is baked into the exported PCM using the same `GainProcessor` semantics as playback, including the current full-scale clamp.
+
+Currently supported input WAV sample encodings:
 
 - PCM integer: 8, 16, 24, and 32-bit
 - IEEE float: 32 and 64-bit
 - WAVE_FORMAT_EXTENSIBLE when its sub-format is PCM or IEEE float
 
-Playback is still intentionally limited to one mono/stereo track at its native sample rate. Mixing, resampling, fades, additional codecs, and export come later.
+Playback and export are still intentionally limited to one mono/stereo track at one native sample rate. Mixing, resampling, fades, additional codecs, and RF64 come later.
 
 ## First useful target
 
 Open audio → waveform → select → trim / split / move / amplify → undo / redo → export.
+
+Brick #8 reaches that first end-to-end target for WAV files.
 
 Quick Trim, Quick Amplify, and Quick Join will eventually sit on top of those exact same operations.
 
