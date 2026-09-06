@@ -10,8 +10,8 @@ android {
         applicationId = "io.github.thgillwtnorizoh.modesty"
         minSdk = 26
         targetSdk = 36
-        versionCode = 11
-        versionName = "0.9.0-dev"
+        versionCode = 12
+        versionName = "0.9.1-dev"
     }
 
     compileOptions {
