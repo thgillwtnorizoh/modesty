@@ -26,6 +26,7 @@ import io.github.thgillwtnorizoh.modesty.core.editing.ProjectEditor
 import io.github.thgillwtnorizoh.modesty.core.editing.SplitTimelineRange
 import io.github.thgillwtnorizoh.modesty.core.editing.TrimClip
 import io.github.thgillwtnorizoh.modesty.core.editing.clipMoveBounds
+import io.github.thgillwtnorizoh.modesty.core.io.Pcm16WavEncoder
 import io.github.thgillwtnorizoh.modesty.core.io.WavDecoder
 import io.github.thgillwtnorizoh.modesty.core.io.WavEncoding
 import io.github.thgillwtnorizoh.modesty.core.model.AudioClip
@@ -34,6 +35,7 @@ import io.github.thgillwtnorizoh.modesty.core.model.AudioSource
 import io.github.thgillwtnorizoh.modesty.core.model.AudioTrack as ProjectTrack
 import io.github.thgillwtnorizoh.modesty.core.model.SourceRange
 import io.github.thgillwtnorizoh.modesty.core.playback.PlaybackState
+import io.github.thgillwtnorizoh.modesty.core.render.TimelineRenderer
 import io.github.thgillwtnorizoh.modesty.core.waveform.InMemoryWaveformCache
 import io.github.thgillwtnorizoh.modesty.core.waveform.WaveformPyramidBuilder
 import io.github.thgillwtnorizoh.modesty.platform.playback.AndroidTimelinePlaybackEngine
@@ -44,6 +46,7 @@ import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
     private lateinit var statusText: TextView
@@ -55,6 +58,7 @@ class MainActivity : Activity() {
     private lateinit var splitButton: Button
     private lateinit var deleteButton: Button
     private lateinit var amplifyButton: Button
+    private lateinit var exportButton: Button
     private lateinit var undoButton: Button
     private lateinit var redoButton: Button
     private lateinit var timeText: TextView
@@ -70,6 +74,7 @@ class MainActivity : Activity() {
     private var projectEditor: ProjectEditor? = null
     private var waveformCache: InMemoryWaveformCache? = null
     private var playbackLoaded = false
+    private var exportInProgress = false
     private var loadedSampleRate = 48_000
     private var loadedChannelCount = 0
     private var loadedSourceTotalFrames = 0L
@@ -128,7 +133,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
         })
         root.addView(TextView(this).apply {
-            text = "Foundation brick 7.1\nGain finally shows its work."
+            text = "Foundation brick 8\nThe boy packs bento now."
             textSize = 16f
             gravity = Gravity.CENTER
             setPadding(0, dp(6), 0, dp(18))
@@ -139,7 +144,7 @@ class MainActivity : Activity() {
         })
 
         statusText = TextView(this).apply {
-            text = "Choose a WAV file to inspect, play, edit, arrange, and amplify."
+            text = "Choose a WAV file to inspect, play, edit, arrange, amplify, and export."
             textSize = 15f
             gravity = Gravity.CENTER
             setPadding(0, dp(16), 0, dp(8))
@@ -252,6 +257,13 @@ class MainActivity : Activity() {
         }
         root.addView(gainSummaryText)
 
+        exportButton = Button(this).apply {
+            text = "Export WAV"
+            isEnabled = false
+            setOnClickListener { chooseExportWav() }
+        }
+        root.addView(exportButton)
+
         val historyControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -271,7 +283,7 @@ class MainActivity : Activity() {
         root.addView(historyControls)
 
         root.addView(TextView(this).apply {
-            text = "The source waveform cache stays untouched; clip gain is applied while drawing and while playing. Large positive gain can hard-clip, so preview at a comfortable device volume."
+            text = "Export renders the same clip positions, silence gaps, trims, moves, and gain you preview here. Brick #8 writes standard 16-bit PCM WAV while preserving the project sample rate and mono/stereo layout."
             textSize = 12f
             gravity = Gravity.CENTER
             setPadding(0, dp(12), 0, 0)
@@ -513,19 +525,105 @@ class MainActivity : Activity() {
         startActivityForResult(intent, REQUEST_OPEN_WAV)
     }
 
+    private fun chooseExportWav() {
+        val project = projectEditor?.project ?: return
+        if (project.tracks.singleOrNull()?.clips.isNullOrEmpty() || exportInProgress) return
+        val stem = project.title.substringBeforeLast('.', project.title).ifBlank { "modesty-export" }
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "audio/wav"
+            putExtra(Intent.EXTRA_TITLE, "${stem}_modesty.wav")
+            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }
+        startActivityForResult(intent, REQUEST_EXPORT_WAV)
+    }
+
     @Deprecated("Legacy Activity callback keeps the foundation dependency-free")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQUEST_OPEN_WAV || resultCode != RESULT_OK) return
+        if (resultCode != RESULT_OK) return
         val uri = data?.data ?: return
-        try {
-            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        } catch (_: SecurityException) {
-            // Some providers grant only temporary access. The current selection remains usable.
+
+        when (requestCode) {
+            REQUEST_OPEN_WAV -> {
+                try {
+                    contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (_: SecurityException) {
+                    // Some providers grant only temporary access. The current selection remains usable.
+                }
+                selectedUri = uri.toString()
+                clearRestoredClips()
+                loadWav(uri)
+            }
+
+            REQUEST_EXPORT_WAV -> exportProjectTo(uri)
         }
-        selectedUri = uri.toString()
-        clearRestoredClips()
-        loadWav(uri)
+    }
+
+    private fun exportProjectTo(uri: Uri) {
+        val project = projectEditor?.project ?: return
+        if (project.tracks.singleOrNull()?.clips.isNullOrEmpty() || exportInProgress) return
+
+        playbackEngine.stop()
+        exportInProgress = true
+        updateExportButton()
+        statusText.text = "Packing WAV bento… 0%"
+
+        worker.execute {
+            try {
+                val renderer = TimelineRenderer(project) { source ->
+                    WavDecoder {
+                        contentResolver.openInputStream(Uri.parse(source.location))
+                            ?: error("Android could not reopen source audio for export")
+                    }
+                }
+                val info = renderer.outputInfo
+                var lastShownPercent = -5
+
+                val rawOutput = contentResolver.openOutputStream(uri, "w")
+                    ?: error("Android could not open the destination document")
+                rawOutput.use { stream ->
+                    Pcm16WavEncoder(
+                        rawOutput = stream,
+                        sampleRate = info.sampleRate,
+                        channelCount = info.channelCount,
+                        totalFrames = info.totalFrames,
+                    ).use { encoder ->
+                        renderer.render(encoder) { progress ->
+                            val percent = (progress * 100f).roundToInt().coerceIn(0, 100)
+                            if (percent >= lastShownPercent + 5 || percent == 100) {
+                                lastShownPercent = percent
+                                runOnUiThread {
+                                    if (!isDestroyed && exportInProgress) {
+                                        statusText.text = "Packing WAV bento… $percent%"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                runOnUiThread {
+                    if (!isDestroyed) {
+                        statusText.text = "Exported ${formatDuration(info.totalFrames, info.sampleRate.hz)} as 16-bit PCM WAV. Bento packed."
+                    }
+                }
+            } catch (error: Throwable) {
+                runCatching { contentResolver.delete(uri, null, null) }
+                runOnUiThread {
+                    if (!isDestroyed) {
+                        statusText.text = "Export failed: ${error.message ?: error.javaClass.simpleName}"
+                    }
+                }
+            } finally {
+                runOnUiThread {
+                    if (!isDestroyed) {
+                        exportInProgress = false
+                        updateExportButton()
+                    }
+                }
+            }
+        }
     }
 
     private fun loadWav(uri: Uri) {
@@ -535,9 +633,9 @@ class MainActivity : Activity() {
         waveformCache = null
         playbackLoaded = false
         loadedChannelCount = 0
-        loadedSourceTotalFrames = 0
-        timelineWindowStartFrame = 0
-        timelineWindowEndFrameExclusive = 0
+        loadedSourceTotalFrames = 0L
+        timelineWindowStartFrame = 0L
+        timelineWindowEndFrameExclusive = 0L
         selectionTimelineStartFrame = null
         selectionTimelineEndFrameExclusive = null
         lastShownPlaybackError = null
@@ -546,6 +644,7 @@ class MainActivity : Activity() {
         gainSummaryText.text = "Clip gain: waiting for audio."
         waveformView.clearWaveform()
         updateSelectionUi()
+        updateExportButton()
         updatePlaybackUi()
 
         worker.execute {
@@ -571,7 +670,7 @@ class MainActivity : Activity() {
                     totalFrames = metadata.info.totalFrames,
                 )
                 val baseProject = AudioProject(
-                    id = "brick7-project",
+                    id = "brick8-project",
                     title = displayName,
                     timelineRate = source.sampleRate,
                     sources = mapOf(source.id to source),
@@ -617,7 +716,7 @@ class MainActivity : Activity() {
                     metadataText.text = details
                     projectEditor = ProjectEditor(restoredProject)
                     clearRestoredClips()
-                    bindEditorProject("Waveform ready. Gain-aware display armed.")
+                    bindEditorProject("Waveform ready. Bento box armed.")
                 }
             } catch (error: Throwable) {
                 runOnUiThread {
@@ -630,6 +729,7 @@ class MainActivity : Activity() {
                     gainSummaryText.text = "Clip gain: unavailable."
                     waveformView.clearWaveform()
                     updateSelectionUi()
+                    updateExportButton()
                     updatePlaybackUi()
                 }
             }
@@ -718,6 +818,7 @@ class MainActivity : Activity() {
         statusText.text = statusMessage
         updateGainSummary(project)
         updateSelectionUi()
+        updateExportButton()
         updatePlaybackUi()
     }
 
@@ -781,6 +882,13 @@ class MainActivity : Activity() {
         deleteButton.isEnabled = selectionOverlapsAudio(project, start, end)
         amplifyButton.isEnabled = selectionOverlapsAudio(project, start, end)
         updateHistoryButtons()
+    }
+
+    private fun updateExportButton() {
+        if (!::exportButton.isInitialized) return
+        val hasAudio = projectEditor?.project?.tracks?.singleOrNull()?.clips?.isNotEmpty() == true
+        exportButton.isEnabled = hasAudio && !exportInProgress
+        exportButton.text = if (exportInProgress) "Exporting…" else "Export WAV"
     }
 
     private fun updateHistoryButtons() {
@@ -903,6 +1011,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_OPEN_WAV = 2001
+        private const val REQUEST_EXPORT_WAV = 2002
         private const val STATE_SELECTED_URI = "selected_wav_uri"
         private const val STATE_CLIP_IDS = "clip_ids"
         private const val STATE_CLIP_SOURCE_STARTS = "clip_source_starts"
