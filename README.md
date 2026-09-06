@@ -17,26 +17,30 @@ The foundation is being built and tested one brick at a time:
 - multi-resolution waveform cache
 - real WAV decoding
 - hardware-derived playback playhead
+- non-overlapping multi-clip timeline playback
 - Android shell kept dependency-light
 
 The project currently targets `compileSdk 36` / `targetSdk 36` and uses JDK 17. This is intentional while the core is being established so CI does not depend on API 37 tooling.
 
 ## Current brick
 
-**Brick #4: selection + nondestructive trim + undo**
+**Brick #5: split + delete + multi-clip timeline**
 
 The Android shell can now:
 
 - pick and decode a real WAV
 - build and render its waveform pyramid
 - play/pause/stop through Android `AudioTrack`
-- tap the waveform to seek
-- drag across the waveform to create a selection
-- trim the clip to that selected source range without modifying the WAV
-- redraw and replay only the trimmed clip range
-- undo the trim back to the previous project state
+- tap the timeline to seek
+- drag across the timeline to create a selection
+- trim a single clip nondestructively
+- split clips at both boundaries of a selection
+- delete audio under a timeline selection without touching the source file
+- render and play multiple non-overlapping clips on one track
+- render deleted regions as timeline gaps and play those gaps as silence
+- undo and redo timeline edits
 
-The waveform cache still describes the immutable full source. Trimming only changes clip metadata and asks the cache for a smaller visible source range, so waveform analysis is not rebuilt after each trim.
+Split and delete are metadata edits. The source WAV and its waveform pyramid remain immutable. Deleting a range currently leaves silence in the timeline; ripple delete is intentionally a later operation.
 
 Currently supported WAV sample encodings:
 
@@ -44,7 +48,7 @@ Currently supported WAV sample encodings:
 - IEEE float: 32 and 64-bit
 - WAVE_FORMAT_EXTENSIBLE when its sub-format is PCM or IEEE float
 
-Playback is still intentionally limited to one mono/stereo clip at its native sample rate. Mixing, resampling, split/delete, effects UI, and export come later.
+Playback still deliberately supports one track, mono/stereo output, non-overlapping clips, and sources whose sample rate matches the project timeline rate. Mixing, resampling, effects UI, moving clips, and export come later.
 
 ## First useful target
 

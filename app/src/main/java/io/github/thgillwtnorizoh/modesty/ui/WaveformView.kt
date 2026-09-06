@@ -8,7 +8,26 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import io.github.thgillwtnorizoh.modesty.core.waveform.WaveformCache
+import kotlin.math.roundToInt
 import kotlin.math.roundToLong
+
+data class TimelineWaveformClip(
+    val id: String,
+    val sourceId: String,
+    val sourceStartFrame: Long,
+    val sourceEndFrameExclusive: Long,
+    val timelineStartFrame: Long,
+    val timelineEndFrameExclusive: Long,
+) {
+    init {
+        require(id.isNotBlank())
+        require(sourceId.isNotBlank())
+        require(sourceStartFrame >= 0)
+        require(sourceEndFrameExclusive > sourceStartFrame)
+        require(timelineStartFrame >= 0)
+        require(timelineEndFrameExclusive > timelineStartFrame)
+    }
+}
 
 class WaveformView(context: Context) : View(context) {
     private val waveformPaint = Paint().apply {
@@ -19,6 +38,11 @@ class WaveformView(context: Context) : View(context) {
     private val guidePaint = Paint().apply {
         color = Color.rgb(190, 190, 190)
         strokeWidth = 1f
+    }
+    private val clipBoundaryPaint = Paint().apply {
+        color = Color.rgb(110, 130, 155)
+        strokeWidth = resources.displayMetrics.density
+        isAntiAlias = false
     }
     private val selectionPaint = Paint().apply {
         color = Color.argb(56, 55, 120, 215)
@@ -39,22 +63,23 @@ class WaveformView(context: Context) : View(context) {
         textSize = 14f * resources.displayMetrics.scaledDensity
         isAntiAlias = true
     }
+    private val clipTextPaint = Paint().apply {
+        color = Color.rgb(90, 105, 125)
+        textSize = 11f * resources.displayMetrics.scaledDensity
+        isAntiAlias = true
+    }
 
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
 
     private var cache: WaveformCache? = null
-    private var sourceId: String? = null
-    private var sourceTotalFrames: Long = 0
     private var channelCount: Int = 0
-
-    private var visibleSourceStartFrame: Long = 0
-    private var visibleSourceEndFrameExclusive: Long = 0
-    private var timelineStartFrame: Long = 0
-    private var timelineEndFrameExclusive: Long = 0
+    private var clips: List<TimelineWaveformClip> = emptyList()
+    private var visibleTimelineStartFrame: Long = 0
+    private var visibleTimelineEndFrameExclusive: Long = 0
     private var playheadFrame: Long = 0
 
-    private var selectionStartSourceFrame: Long? = null
-    private var selectionEndSourceFrameExclusive: Long? = null
+    private var selectionStartTimelineFrame: Long? = null
+    private var selectionEndTimelineFrameExclusive: Long? = null
     private var downX: Float = 0f
     private var downY: Float = 0f
     private var gestureIntent = WaveformGestureIntent.UNDECIDED
@@ -64,55 +89,46 @@ class WaveformView(context: Context) : View(context) {
     var onSeekRequested: ((Long) -> Unit)? = null
     var onSelectionChanged: ((Long?, Long?) -> Unit)? = null
 
-    fun setWaveform(
+    fun setTimeline(
         cache: WaveformCache,
-        sourceId: String,
-        totalFrames: Long,
         channelCount: Int,
+        clips: List<TimelineWaveformClip>,
+        visibleTimelineStartFrame: Long,
+        visibleTimelineEndFrameExclusive: Long,
     ) {
-        require(totalFrames > 0)
         require(channelCount > 0)
+        require(visibleTimelineStartFrame >= 0)
+        require(visibleTimelineEndFrameExclusive > visibleTimelineStartFrame)
+
         this.cache = cache
-        this.sourceId = sourceId
-        sourceTotalFrames = totalFrames
         this.channelCount = channelCount
-        visibleSourceStartFrame = 0
-        visibleSourceEndFrameExclusive = totalFrames
-        timelineStartFrame = 0
-        timelineEndFrameExclusive = totalFrames
-        playheadFrame = 0
+        this.clips = clips.sortedBy { it.timelineStartFrame }
+        this.visibleTimelineStartFrame = visibleTimelineStartFrame
+        this.visibleTimelineEndFrameExclusive = visibleTimelineEndFrameExclusive
+        playheadFrame = visibleTimelineStartFrame
         clearSelectionInternal(notify = false)
         invalidate()
     }
 
-    /**
-     * Makes one clip range the visible editing window without rebuilding the waveform cache.
-     * Source and timeline ranges are supplied separately so the view does not assume they will
-     * remain 1:1 once resampling enters the engine later.
-     */
-    fun setClipWindow(
-        sourceStartFrame: Long,
-        sourceEndFrameExclusive: Long,
-        timelineStartFrame: Long,
-        timelineEndFrameExclusive: Long,
+    fun setSelection(
+        startTimelineFrame: Long,
+        endTimelineFrameExclusive: Long,
+        notify: Boolean = true,
     ) {
-        require(sourceStartFrame >= 0)
-        require(sourceEndFrameExclusive > sourceStartFrame)
-        require(sourceEndFrameExclusive <= sourceTotalFrames)
-        require(timelineStartFrame >= 0)
-        require(timelineEndFrameExclusive > timelineStartFrame)
-
-        visibleSourceStartFrame = sourceStartFrame
-        visibleSourceEndFrameExclusive = sourceEndFrameExclusive
-        this.timelineStartFrame = timelineStartFrame
-        this.timelineEndFrameExclusive = timelineEndFrameExclusive
-        playheadFrame = timelineStartFrame
-        clearSelectionInternal(notify = false)
+        val start = startTimelineFrame.coerceIn(visibleTimelineStartFrame, visibleTimelineEndFrameExclusive)
+        val end = endTimelineFrameExclusive.coerceIn(visibleTimelineStartFrame, visibleTimelineEndFrameExclusive)
+        if (end <= start) {
+            clearSelectionInternal(notify)
+            return
+        }
+        selectionStartTimelineFrame = start
+        selectionEndTimelineFrameExclusive = end
+        if (notify) onSelectionChanged?.invoke(start, end)
         invalidate()
     }
 
     fun setPlayheadFrame(frame: Long) {
-        val clamped = frame.coerceIn(timelineStartFrame, timelineEndFrameExclusive)
+        val clamped = frame.coerceIn(visibleTimelineStartFrame, visibleTimelineEndFrameExclusive)
         if (clamped == playheadFrame) return
         playheadFrame = clamped
         invalidate()
@@ -124,13 +140,10 @@ class WaveformView(context: Context) : View(context) {
 
     fun clearWaveform() {
         cache = null
-        sourceId = null
-        sourceTotalFrames = 0
         channelCount = 0
-        visibleSourceStartFrame = 0
-        visibleSourceEndFrameExclusive = 0
-        timelineStartFrame = 0
-        timelineEndFrameExclusive = 0
+        clips = emptyList()
+        visibleTimelineStartFrame = 0
+        visibleTimelineEndFrameExclusive = 0
         playheadFrame = 0
         clearSelectionInternal(notify = false)
         invalidate()
@@ -141,17 +154,8 @@ class WaveformView(context: Context) : View(context) {
         canvas.drawColor(Color.rgb(247, 247, 247))
 
         val localCache = cache
-        val localSourceId = sourceId
-        val visibleSourceFrames = visibleSourceEndFrameExclusive - visibleSourceStartFrame
-        val visibleTimelineFrames = timelineEndFrameExclusive - timelineStartFrame
-        if (
-            localCache == null ||
-            localSourceId == null ||
-            sourceTotalFrames <= 0 ||
-            channelCount <= 0 ||
-            visibleSourceFrames <= 0 ||
-            visibleTimelineFrames <= 0
-        ) {
+        val timelineLength = visibleTimelineEndFrameExclusive - visibleTimelineStartFrame
+        if (localCache == null || channelCount <= 0 || timelineLength <= 0) {
             canvas.drawText("No waveform loaded", paddingLeft + 12f, height / 2f, textPaint)
             return
         }
@@ -161,9 +165,7 @@ class WaveformView(context: Context) : View(context) {
         val channelHeight = drawableHeight.toFloat() / channelCount
 
         for (channel in 0 until channelCount) {
-            val channelTop = paddingTop + channel * channelHeight
-            val centerY = channelTop + channelHeight / 2f
-            val amplitudeHeight = channelHeight * 0.45f
+            val centerY = paddingTop + channel * channelHeight + channelHeight / 2f
             canvas.drawLine(
                 paddingLeft.toFloat(),
                 centerY,
@@ -171,41 +173,26 @@ class WaveformView(context: Context) : View(context) {
                 centerY,
                 guidePaint,
             )
-
-            val buckets = localCache.read(
-                sourceId = localSourceId,
-                channel = channel,
-                startSourceFrame = visibleSourceStartFrame,
-                endSourceFrameExclusive = visibleSourceEndFrameExclusive,
-                bucketCount = drawableWidth,
-            )
-            if (buckets.isEmpty()) continue
-
-            val xStep = drawableWidth.toFloat() / buckets.size
-            buckets.forEachIndexed { index, bucket ->
-                val x = paddingLeft + (index + 0.5f) * xStep
-                val min = bucket.min.coerceIn(-1f, 1f)
-                val max = bucket.max.coerceIn(-1f, 1f)
-                val yTop = centerY - max * amplitudeHeight
-                val yBottom = centerY - min * amplitudeHeight
-                canvas.drawLine(x, yTop, x, yBottom, waveformPaint)
-            }
-
-            if (channelCount > 1) {
-                canvas.drawText(
-                    "CH ${channel + 1}",
-                    paddingLeft + 8f,
-                    channelTop + textPaint.textSize + 4f,
-                    textPaint,
-                )
-            }
         }
 
-        val selectionStart = selectionStartSourceFrame
-        val selectionEnd = selectionEndSourceFrameExclusive
+        clips.forEachIndexed { clipIndex, clip ->
+            drawClip(canvas, localCache, clip, clipIndex, drawableWidth, channelHeight)
+        }
+
+        if (clips.isEmpty()) {
+            canvas.drawText(
+                "No clips remain. Undo can bring them back.",
+                paddingLeft + 12f,
+                height / 2f,
+                textPaint,
+            )
+        }
+
+        val selectionStart = selectionStartTimelineFrame
+        val selectionEnd = selectionEndTimelineFrameExclusive
         if (selectionStart != null && selectionEnd != null && selectionEnd > selectionStart) {
-            val left = xForSourceFrame(selectionStart)
-            val right = xForSourceFrame(selectionEnd)
+            val left = xForTimelineFrame(selectionStart)
+            val right = xForTimelineFrame(selectionEnd)
             canvas.drawRect(
                 left,
                 paddingTop.toFloat(),
@@ -227,19 +214,78 @@ class WaveformView(context: Context) : View(context) {
         )
     }
 
+    private fun drawClip(
+        canvas: Canvas,
+        localCache: WaveformCache,
+        clip: TimelineWaveformClip,
+        clipIndex: Int,
+        drawableWidth: Int,
+        channelHeight: Float,
+    ) {
+        val overlapStart = maxOf(clip.timelineStartFrame, visibleTimelineStartFrame)
+        val overlapEnd = minOf(clip.timelineEndFrameExclusive, visibleTimelineEndFrameExclusive)
+        if (overlapEnd <= overlapStart) return
+
+        val clipTimelineLength = clip.timelineEndFrameExclusive - clip.timelineStartFrame
+        val clipSourceLength = clip.sourceEndFrameExclusive - clip.sourceStartFrame
+        val startFraction = (overlapStart - clip.timelineStartFrame).toDouble() / clipTimelineLength.toDouble()
+        val endFraction = (overlapEnd - clip.timelineStartFrame).toDouble() / clipTimelineLength.toDouble()
+        val sourceStart = (clip.sourceStartFrame + startFraction * clipSourceLength).roundToLong()
+            .coerceIn(clip.sourceStartFrame, clip.sourceEndFrameExclusive - 1)
+        val sourceEnd = (clip.sourceStartFrame + endFraction * clipSourceLength).roundToLong()
+            .coerceIn(sourceStart + 1, clip.sourceEndFrameExclusive)
+
+        val left = xForTimelineFrame(overlapStart)
+        val right = xForTimelineFrame(overlapEnd)
+        val pixelWidth = (right - left).roundToInt().coerceAtLeast(1).coerceAtMost(drawableWidth)
+
+        for (channel in 0 until channelCount) {
+            val centerY = paddingTop + channel * channelHeight + channelHeight / 2f
+            val amplitudeHeight = channelHeight * 0.45f
+            val buckets = localCache.read(
+                sourceId = clip.sourceId,
+                channel = channel,
+                startSourceFrame = sourceStart,
+                endSourceFrameExclusive = sourceEnd,
+                bucketCount = pixelWidth,
+            )
+            if (buckets.isEmpty()) continue
+
+            val xStep = (right - left) / buckets.size
+            buckets.forEachIndexed { index, bucket ->
+                val x = left + (index + 0.5f) * xStep
+                val min = bucket.min.coerceIn(-1f, 1f)
+                val max = bucket.max.coerceIn(-1f, 1f)
+                val yTop = centerY - max * amplitudeHeight
+                val yBottom = centerY - min * amplitudeHeight
+                canvas.drawLine(x, yTop, x, yBottom, waveformPaint)
+            }
+        }
+
+        val boundaryTop = paddingTop.toFloat()
+        val boundaryBottom = (height - paddingBottom).toFloat()
+        canvas.drawLine(left, boundaryTop, left, boundaryBottom, clipBoundaryPaint)
+        canvas.drawLine(right, boundaryTop, right, boundaryBottom, clipBoundaryPaint)
+        if (right - left > 34f * resources.displayMetrics.density) {
+            canvas.drawText(
+                "C${clipIndex + 1}",
+                left + 4f * resources.displayMetrics.density,
+                paddingTop + clipTextPaint.textSize + 2f,
+                clipTextPaint,
+            )
+        }
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (cache == null || visibleSourceEndFrameExclusive <= visibleSourceStartFrame) return false
+        if (cache == null || visibleTimelineEndFrameExclusive <= visibleTimelineStartFrame) return false
 
         return when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 downX = event.x
                 downY = event.y
                 gestureIntent = WaveformGestureIntent.UNDECIDED
-                selectionBeforeGestureStart = selectionStartSourceFrame
-                selectionBeforeGestureEnd = selectionEndSourceFrameExclusive
-
-                // Keep the parent ScrollView from stealing the gesture before we know whether the
-                // user means horizontal selection or vertical page scrolling.
+                selectionBeforeGestureStart = selectionStartTimelineFrame
+                selectionBeforeGestureEnd = selectionEndTimelineFrameExclusive
                 parent?.requestDisallowInterceptTouchEvent(true)
                 true
             }
@@ -251,11 +297,7 @@ class WaveformView(context: Context) : View(context) {
                         deltaY = event.y - downY,
                         touchSlop = touchSlop,
                     )
-
                     if (gestureIntent == WaveformGestureIntent.SCROLL) {
-                        // Hand the gesture back to the ScrollView. The next MOVE may be intercepted,
-                        // which will deliver ACTION_CANCEL here. That cancel must not erase an
-                        // already committed selection.
                         parent?.requestDisallowInterceptTouchEvent(false)
                     }
                 }
@@ -265,11 +307,7 @@ class WaveformView(context: Context) : View(context) {
                         parent?.requestDisallowInterceptTouchEvent(true)
                         updateSelectionFromXs(downX, event.x, notify = true)
                     }
-
-                    WaveformGestureIntent.SCROLL -> {
-                        parent?.requestDisallowInterceptTouchEvent(false)
-                    }
-
+                    WaveformGestureIntent.SCROLL -> parent?.requestDisallowInterceptTouchEvent(false)
                     WaveformGestureIntent.UNDECIDED -> Unit
                 }
                 true
@@ -277,14 +315,8 @@ class WaveformView(context: Context) : View(context) {
 
             MotionEvent.ACTION_UP -> {
                 when (gestureIntent) {
-                    WaveformGestureIntent.SELECT -> {
-                        updateSelectionFromXs(downX, event.x, notify = true)
-                    }
-
-                    WaveformGestureIntent.SCROLL -> {
-                        // Deliberately do nothing. Vertical scrolling must not alter selection.
-                    }
-
+                    WaveformGestureIntent.SELECT -> updateSelectionFromXs(downX, event.x, notify = true)
+                    WaveformGestureIntent.SCROLL -> Unit
                     WaveformGestureIntent.UNDECIDED -> {
                         clearSelectionInternal(notify = true)
                         val frame = timelineFrameAtX(event.x)
@@ -293,16 +325,12 @@ class WaveformView(context: Context) : View(context) {
                         performClick()
                     }
                 }
-
                 parent?.requestDisallowInterceptTouchEvent(false)
                 gestureIntent = WaveformGestureIntent.UNDECIDED
                 true
             }
 
             MotionEvent.ACTION_CANCEL -> {
-                // Cancellation often means the parent ScrollView took over. Preserve the selection
-                // that existed before this gesture rather than turning ordinary thumb jitter into
-                // destructive UI behaviour.
                 restoreSelectionBeforeGesture()
                 parent?.requestDisallowInterceptTouchEvent(false)
                 gestureIntent = WaveformGestureIntent.UNDECIDED
@@ -319,8 +347,8 @@ class WaveformView(context: Context) : View(context) {
     }
 
     private fun updateSelectionFromXs(firstX: Float, secondX: Float, notify: Boolean) {
-        val first = sourceFrameAtX(firstX)
-        val second = sourceFrameAtX(secondX)
+        val first = timelineFrameAtX(firstX)
+        val second = timelineFrameAtX(secondX)
         val low = minOf(first, second)
         val high = maxOf(first, second)
 
@@ -329,8 +357,8 @@ class WaveformView(context: Context) : View(context) {
             return
         }
 
-        selectionStartSourceFrame = low
-        selectionEndSourceFrameExclusive = high
+        selectionStartTimelineFrame = low
+        selectionEndTimelineFrameExclusive = high
         if (notify) onSelectionChanged?.invoke(low, high)
         invalidate()
     }
@@ -338,47 +366,33 @@ class WaveformView(context: Context) : View(context) {
     private fun restoreSelectionBeforeGesture() {
         val start = selectionBeforeGestureStart
         val end = selectionBeforeGestureEnd
-        if (selectionStartSourceFrame == start && selectionEndSourceFrameExclusive == end) return
+        if (selectionStartTimelineFrame == start && selectionEndTimelineFrameExclusive == end) return
 
-        selectionStartSourceFrame = start
-        selectionEndSourceFrameExclusive = end
+        selectionStartTimelineFrame = start
+        selectionEndTimelineFrameExclusive = end
         onSelectionChanged?.invoke(start, end)
         invalidate()
     }
 
     private fun clearSelectionInternal(notify: Boolean) {
-        val changed = selectionStartSourceFrame != null || selectionEndSourceFrameExclusive != null
-        selectionStartSourceFrame = null
-        selectionEndSourceFrameExclusive = null
+        val changed = selectionStartTimelineFrame != null || selectionEndTimelineFrameExclusive != null
+        selectionStartTimelineFrame = null
+        selectionEndTimelineFrameExclusive = null
         if (changed) invalidate()
         if (notify) onSelectionChanged?.invoke(null, null)
     }
 
-    private fun sourceFrameAtX(x: Float): Long {
-        val fraction = fractionAtX(x)
-        val length = visibleSourceEndFrameExclusive - visibleSourceStartFrame
-        return (visibleSourceStartFrame + fraction * length.toDouble()).roundToLong()
-            .coerceIn(visibleSourceStartFrame, visibleSourceEndFrameExclusive)
-    }
-
     private fun timelineFrameAtX(x: Float): Long {
         val fraction = fractionAtX(x)
-        val length = timelineEndFrameExclusive - timelineStartFrame
-        return (timelineStartFrame + fraction * length.toDouble()).roundToLong()
-            .coerceIn(timelineStartFrame, timelineEndFrameExclusive)
-    }
-
-    private fun xForSourceFrame(frame: Long): Float {
-        val drawableWidth = (width - paddingLeft - paddingRight).coerceAtLeast(1)
-        val length = (visibleSourceEndFrameExclusive - visibleSourceStartFrame).coerceAtLeast(1)
-        val fraction = (frame - visibleSourceStartFrame).toDouble() / length.toDouble()
-        return paddingLeft + (fraction.coerceIn(0.0, 1.0) * drawableWidth).toFloat()
+        val length = visibleTimelineEndFrameExclusive - visibleTimelineStartFrame
+        return (visibleTimelineStartFrame + fraction * length.toDouble()).roundToLong()
+            .coerceIn(visibleTimelineStartFrame, visibleTimelineEndFrameExclusive)
     }
 
     private fun xForTimelineFrame(frame: Long): Float {
         val drawableWidth = (width - paddingLeft - paddingRight).coerceAtLeast(1)
-        val length = (timelineEndFrameExclusive - timelineStartFrame).coerceAtLeast(1)
-        val fraction = (frame - timelineStartFrame).toDouble() / length.toDouble()
+        val length = (visibleTimelineEndFrameExclusive - visibleTimelineStartFrame).coerceAtLeast(1)
+        val fraction = (frame - visibleTimelineStartFrame).toDouble() / length.toDouble()
         return paddingLeft + (fraction.coerceIn(0.0, 1.0) * drawableWidth).toFloat()
     }
 

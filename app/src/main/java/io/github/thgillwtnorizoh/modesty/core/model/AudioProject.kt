@@ -86,8 +86,17 @@ data class AudioProject(
         return (sourceFrames.toDouble() * timelineRate.hz / source.sampleRate.hz).roundToLong()
     }
 
+    fun projectFramesToSourceFrames(sourceId: String, projectFrames: Long): Long {
+        require(projectFrames >= 0)
+        val source = sources[sourceId] ?: error("Unknown source: $sourceId")
+        return (projectFrames.toDouble() * source.sampleRate.hz / timelineRate.hz).roundToLong()
+    }
+
     fun clipTimelineDurationFrames(clip: AudioClip): Long =
         sourceFramesToProjectFrames(clip.sourceId, clip.sourceRange.lengthFrames)
+
+    fun clipTimelineEndFrameExclusive(clip: AudioClip): Long =
+        clip.timelineStartFrame + clipTimelineDurationFrames(clip)
 
     fun validate(): AudioProject {
         val trackIds = mutableSetOf<String>()

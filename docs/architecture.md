@@ -20,17 +20,17 @@ Modesty deliberately keeps source time and timeline time separate.
 - Importing a source does not destructively resample it.
 - Playback/export implementations are responsible for converting source audio into the timeline rate when required.
 
-This avoids quietly modifying source files and makes mixed-rate projects possible.
+`AudioProject` exposes conversions in both directions between source frames and project frames. Brick #5 needs the reverse conversion because timeline selections may cut a source-backed clip at arbitrary timeline boundaries.
 
 ## Project metadata
 
 `AudioProject` contains source descriptions and tracks. `AudioTrack` contains clips. `AudioClip` points at a range of an immutable source plus timeline/edit metadata such as gain and fades.
 
-The source audio itself is not stored inside the clip object.
+The source audio itself is not stored inside the clip object. Splitting a clip creates more clip descriptors referencing the same source. Deleting a range removes or shortens those descriptors; it never rewrites the source.
 
 ## Edits
 
-Editing operations are pure metadata transformations where possible. The first operations are move, trim, split, and clip gain.
+Editing operations are pure metadata transformations where possible. The current operations include move, trim, split, clip gain, split-at-timeline-selection, and delete-timeline-range.
 
 Continuous touch interactions use `ProjectEditor` transactions:
 
@@ -41,7 +41,12 @@ Continuous touch interactions use `ProjectEditor` transactions:
 
 A completed gesture therefore becomes one undo entry.
 
-Brick #4 connects the existing `TrimClip` operation to the Android shell. A trim changes only `AudioClip.sourceRange` and, when trimming from the left, advances the clip's timeline start by the matching duration. The source WAV remains unchanged. Undo swaps the project metadata back to the previous state.
+Brick #4 connected `TrimClip` to the Android shell. Brick #5 adds two timeline operations:
+
+- `SplitTimelineRange` splits clips at the start and end boundaries of a selection. Boundaries that already land on clip edges or silence are no-ops.
+- `DeleteTimelineRange` removes audio under a timeline selection while preserving every surviving clip's timeline position. The removed interval therefore becomes silence. This is deliberately non-ripple delete.
+
+`ProjectEditor` already stores complete before/after project snapshots, so undo and redo work across split and delete without rebuilding source audio.
 
 ## DSP
 
@@ -49,7 +54,7 @@ DSP operates on interleaved floating-point PCM and has no Android/UI dependency.
 
 ## Audio ingestion
 
-Format decoders implement the Android-free `AudioDecoder` contract. Brick #2 adds `WavDecoder`, which receives an `InputStream` factory rather than a `File` or Android `Uri`. This keeps RIFF/WAVE parsing in the core and allows seeking by reopening and skipping even when a document provider does not expose a directly seekable descriptor.
+Format decoders implement the Android-free `AudioDecoder` contract. `WavDecoder` receives an `InputStream` factory rather than a `File` or Android `Uri`. This keeps RIFF/WAVE parsing in the core and allows seeking by reopening and skipping even when a document provider does not expose a directly seekable descriptor.
 
 The WAV decoder currently supports PCM integer 8/16/24/32-bit samples, IEEE float 32/64-bit samples, and WAVE_FORMAT_EXTENSIBLE when its sub-format resolves to either of those encodings.
 
@@ -57,48 +62,64 @@ The WAV decoder currently supports PCM integer 8/16/24/32-bit samples, IEEE floa
 
 `WaveformCache` exposes visible-range, fixed-resolution buckets rather than a bitmap or Android drawing primitive.
 
-Brick #2 implements a streaming waveform pyramid. The base level records min, max, RMS, and represented frame count for each channel over 256-frame buckets. Each coarser level combines neighbouring buckets until a one-bucket overview remains. Rendering selects the level closest to the requested horizontal resolution instead of rescanning source audio.
+The streaming waveform pyramid records min, max, RMS, and represented frame count for each channel over 256-frame base buckets. Coarser levels combine neighbouring buckets until a one-bucket overview remains. Rendering selects the level closest to the requested horizontal resolution instead of rescanning source audio.
 
-The current cache is in-memory. A later brick can persist or tile waveform data without changing the UI-facing cache contract.
+The cache still represents immutable sources. Brick #5 changes only presentation: `WaveformView` now receives a list of timeline clip descriptors. Each descriptor maps a source range into a timeline range. The view reads only the source buckets needed for each visible clip and leaves uncovered timeline intervals blank.
 
-Brick #4 makes the waveform view clip-aware. The cache still represents the immutable full source, while the view requests only the clip's current source range. This means trimming does not rebuild waveform analysis. The view keeps source and timeline windows separate so a later resampler can change their ratio without redesigning touch mapping.
+This is the first real timeline view:
 
-Touch behaviour at Brick #4 is intentionally small:
-
-- tap maps the visible timeline window to a seek request
-- horizontal drag maps the visible source window to a selection
-- the selection is presentation state, not an edit
-- pressing Trim converts that selection into one `TrimClip` edit
+- tap maps x-position to timeline seek
+- horizontal drag maps x-position to a timeline selection
+- clip boundaries are visible
+- deleted intervals remain visible as gaps
+- vertical page scrolling and horizontal selection continue to use the Brick #4.1 gesture arbiter
 
 ## Playback
 
-Brick #3 adds the first real playback backend. `SingleClipPlaybackPlan` maps the current project/track/clip metadata into one playable source range. `AndroidSingleClipPlaybackEngine` consumes that plan through `AudioDecoder`, streams float PCM to Android `AudioTrack`, and derives the visible playhead from `AudioTrack.playbackHeadPosition` rather than a UI timer.
+Brick #3 proved one-clip playback with a hardware-derived playhead. Brick #5 generalizes the plan into `TimelinePlaybackPlan`.
 
-The current playback foundation deliberately supports exactly one clip on one track, mono/stereo output, and a project rate equal to the source rate. There is no mixer or resampler yet.
+`TimelinePlaybackPlan` currently accepts exactly one track containing one or more non-overlapping clips. It validates that all clips can share one output format until the mixer/resampler arrives. Gaps between clips are legitimate timeline regions.
 
-After Brick #4, every trim or undo reloads the playback plan from the current `ProjectEditor.project`, so playback and waveform presentation receive the same clip boundaries.
+`AndroidTimelinePlaybackEngine` consumes the plan using one Android `AudioTrack`:
+
+```text
+clip PCM ----\
+              +--> one continuous AudioTrack stream --> hardware playhead
+zeroed gap --/
+```
+
+When playback enters a deleted region, the engine writes zero samples for exactly that gap duration. Because clips and silence travel through the same `AudioTrack`, `playbackHeadPosition` remains the authoritative clock across edits rather than switching to a UI timer.
+
+Current playback limits are intentional:
+
+- exactly one track
+- no overlapping clips
+- mono or stereo
+- project rate equals source rate
+- no clip gain or fades in the realtime path yet
 
 ## Android shell
 
-Android owns document selection and presentation only. WAV decoding and waveform analysis run on a worker thread; the activity receives completed metadata and a cache to draw.
+Android owns document selection and presentation. WAV decoding and waveform analysis run on a worker thread.
 
 The activity currently wires together:
 
 ```text
 Document Uri
    |
-   +--> WavDecoder --> waveform pyramid/cache
+   +--> WavDecoder --> immutable waveform pyramid/cache
    |
    +--> AudioSource --> AudioProject --> ProjectEditor
-                                      |          |
-                                      |          +--> Trim / Undo
+                                      |       |       |
+                                      |       |       +--> Undo / Redo
+                                      |       +----------> Trim / Split / Delete
                                       |
-                                      +--> playback plan --> AudioTrack
+                                      +--> TimelinePlaybackPlan --> AudioTrack
                                       |
-                                      +--> clip window --> WaveformView
+                                      +--> timeline clip descriptors --> WaveformView
 ```
 
-The current clip source range is saved through Android instance state so a simple configuration recreation does not silently restore the full source after a trim.
+For configuration recreation, the activity saves the current clip list as IDs, source ranges, and timeline starts. The underlying source is reopened and the project metadata is reconstructed. Edit history itself is not yet persisted across process/activity recreation.
 
 ## I/O direction
 
