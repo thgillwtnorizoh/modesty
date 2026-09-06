@@ -19,6 +19,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import io.github.thgillwtnorizoh.modesty.core.dsp.decibelsToLinearGain
 import io.github.thgillwtnorizoh.modesty.core.dsp.linearGainToDecibels
+import io.github.thgillwtnorizoh.modesty.core.editing.AddSourceClip
 import io.github.thgillwtnorizoh.modesty.core.editing.AmplifyTimelineRange
 import io.github.thgillwtnorizoh.modesty.core.editing.DeleteTimelineRange
 import io.github.thgillwtnorizoh.modesty.core.editing.MoveClip
@@ -28,7 +29,6 @@ import io.github.thgillwtnorizoh.modesty.core.editing.TrimClip
 import io.github.thgillwtnorizoh.modesty.core.editing.clipMoveBounds
 import io.github.thgillwtnorizoh.modesty.core.io.Pcm16WavEncoder
 import io.github.thgillwtnorizoh.modesty.core.io.WavDecoder
-import io.github.thgillwtnorizoh.modesty.core.io.WavEncoding
 import io.github.thgillwtnorizoh.modesty.core.model.AudioClip
 import io.github.thgillwtnorizoh.modesty.core.model.AudioProject
 import io.github.thgillwtnorizoh.modesty.core.model.AudioSource
@@ -37,6 +37,7 @@ import io.github.thgillwtnorizoh.modesty.core.model.SourceRange
 import io.github.thgillwtnorizoh.modesty.core.playback.PlaybackState
 import io.github.thgillwtnorizoh.modesty.core.render.TimelineRenderer
 import io.github.thgillwtnorizoh.modesty.core.waveform.InMemoryWaveformCache
+import io.github.thgillwtnorizoh.modesty.core.waveform.WaveformPyramid
 import io.github.thgillwtnorizoh.modesty.core.waveform.WaveformPyramidBuilder
 import io.github.thgillwtnorizoh.modesty.platform.playback.AndroidTimelinePlaybackEngine
 import io.github.thgillwtnorizoh.modesty.ui.TimelineWaveformClip
@@ -54,6 +55,7 @@ class MainActivity : Activity() {
     private lateinit var waveformView: WaveformView
     private lateinit var playPauseButton: Button
     private lateinit var stopButton: Button
+    private lateinit var addWavButton: Button
     private lateinit var trimButton: Button
     private lateinit var splitButton: Button
     private lateinit var deleteButton: Button
@@ -70,11 +72,11 @@ class MainActivity : Activity() {
     private val loadGeneration = AtomicInteger(0)
     private val uiHandler = Handler(Looper.getMainLooper())
 
-    private var selectedUri: String? = null
     private var projectEditor: ProjectEditor? = null
     private var waveformCache: InMemoryWaveformCache? = null
     private var playbackLoaded = false
     private var exportInProgress = false
+    private var importInProgress = false
     private var loadedSampleRate = 48_000
     private var loadedChannelCount = 0
     private var loadedSourceTotalFrames = 0L
@@ -84,7 +86,10 @@ class MainActivity : Activity() {
     private var selectionTimelineEndFrameExclusive: Long? = null
     private var lastShownPlaybackError: String? = null
 
+    private var restoredSourceIds: ArrayList<String>? = null
+    private var restoredSourceLocations: ArrayList<String>? = null
     private var restoredClipIds: ArrayList<String>? = null
+    private var restoredClipSourceIds: ArrayList<String>? = null
     private var restoredSourceStarts: LongArray? = null
     private var restoredSourceEnds: LongArray? = null
     private var restoredTimelineStarts: LongArray? = null
@@ -99,14 +104,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        selectedUri = savedInstanceState?.getString(STATE_SELECTED_URI)
-        if (savedInstanceState?.containsKey(STATE_CLIP_IDS) == true) {
-            restoredClipIds = savedInstanceState.getStringArrayList(STATE_CLIP_IDS)
-            restoredSourceStarts = savedInstanceState.getLongArray(STATE_CLIP_SOURCE_STARTS)
-            restoredSourceEnds = savedInstanceState.getLongArray(STATE_CLIP_SOURCE_ENDS)
-            restoredTimelineStarts = savedInstanceState.getLongArray(STATE_CLIP_TIMELINE_STARTS)
-            restoredGains = savedInstanceState.getFloatArray(STATE_CLIP_GAINS)
-        }
+        restoreBundleFields(savedInstanceState)
 
         playbackEngine = AndroidTimelinePlaybackEngine { source ->
             WavDecoder {
@@ -116,7 +114,22 @@ class MainActivity : Activity() {
         }
         setContentView(buildContent())
         uiHandler.post(progressTicker)
-        selectedUri?.let { loadWav(Uri.parse(it)) }
+
+        if (!restoredSourceIds.isNullOrEmpty() && !restoredSourceLocations.isNullOrEmpty()) {
+            loadRestoredProject()
+        }
+    }
+
+    private fun restoreBundleFields(state: Bundle?) {
+        if (state == null) return
+        restoredSourceIds = state.getStringArrayList(STATE_SOURCE_IDS)
+        restoredSourceLocations = state.getStringArrayList(STATE_SOURCE_LOCATIONS)
+        restoredClipIds = state.getStringArrayList(STATE_CLIP_IDS)
+        restoredClipSourceIds = state.getStringArrayList(STATE_CLIP_SOURCE_IDS)
+        restoredSourceStarts = state.getLongArray(STATE_CLIP_SOURCE_STARTS)
+        restoredSourceEnds = state.getLongArray(STATE_CLIP_SOURCE_ENDS)
+        restoredTimelineStarts = state.getLongArray(STATE_CLIP_TIMELINE_STARTS)
+        restoredGains = state.getFloatArray(STATE_CLIP_GAINS)
     }
 
     private fun buildContent(): ScrollView {
@@ -133,18 +146,30 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
         })
         root.addView(TextView(this).apply {
-            text = "Foundation brick 8\nThe boy packs bento now."
+            text = "Foundation brick 9\nThe bento has multiple ingredients."
             textSize = 16f
             gravity = Gravity.CENTER
             setPadding(0, dp(6), 0, dp(18))
         })
-        root.addView(Button(this).apply {
+
+        val fileControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        fileControls.addView(Button(this).apply {
             text = "Open WAV"
-            setOnClickListener { chooseWav() }
+            setOnClickListener { chooseWav(REQUEST_OPEN_WAV) }
         })
+        addWavButton = Button(this).apply {
+            text = "Add WAV"
+            isEnabled = false
+            setOnClickListener { chooseWav(REQUEST_ADD_WAV) }
+        }
+        fileControls.addView(addWavButton)
+        root.addView(fileControls)
 
         statusText = TextView(this).apply {
-            text = "Choose a WAV file to inspect, play, edit, arrange, amplify, and export."
+            text = "Open a WAV to start a project, then Add WAV to append another source."
             textSize = 15f
             gravity = Gravity.CENTER
             setPadding(0, dp(16), 0, dp(8))
@@ -283,7 +308,7 @@ class MainActivity : Activity() {
         root.addView(historyControls)
 
         root.addView(TextView(this).apply {
-            text = "Export renders the same clip positions, silence gaps, trims, moves, and gain you preview here. Brick #8 writes standard 16-bit PCM WAV while preserving the project sample rate and mono/stereo layout."
+            text = "Brick #9 appends matching WAV sources on the same non-overlapping track. Imported WAVs must currently match sample rate and channel count. Playback, edits, waveform drawing, and export all use the same project sources."
             textSize = 12f
             gravity = Gravity.CENTER
             setPadding(0, dp(12), 0, 0)
@@ -502,17 +527,18 @@ class MainActivity : Activity() {
         val editor = projectEditor ?: return
         if (!editor.undo()) return
         playbackEngine.stop()
-        bindEditorProject("Undo restored the previous timeline state.")
+        bindEditorProject("Undo restored the previous project state.")
     }
 
     private fun redoEdit() {
         val editor = projectEditor ?: return
         if (!editor.redo()) return
         playbackEngine.stop()
-        bindEditorProject("Redo restored the next timeline state.")
+        bindEditorProject("Redo restored the next project state.")
     }
 
-    private fun chooseWav() {
+    private fun chooseWav(requestCode: Int) {
+        if (requestCode == REQUEST_ADD_WAV && (projectEditor == null || importInProgress || exportInProgress)) return
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
@@ -522,12 +548,12 @@ class MainActivity : Activity() {
             )
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         }
-        startActivityForResult(intent, REQUEST_OPEN_WAV)
+        startActivityForResult(intent, requestCode)
     }
 
     private fun chooseExportWav() {
         val project = projectEditor?.project ?: return
-        if (project.tracks.singleOrNull()?.clips.isNullOrEmpty() || exportInProgress) return
+        if (project.tracks.singleOrNull()?.clips.isNullOrEmpty() || exportInProgress || importInProgress) return
         val stem = project.title.substringBeforeLast('.', project.title).ifBlank { "modesty-export" }
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
@@ -546,37 +572,40 @@ class MainActivity : Activity() {
 
         when (requestCode) {
             REQUEST_OPEN_WAV -> {
-                try {
-                    contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                } catch (_: SecurityException) {
-                    // Some providers grant only temporary access. The current selection remains usable.
-                }
-                selectedUri = uri.toString()
-                clearRestoredClips()
-                loadWav(uri)
+                persistReadPermission(uri)
+                clearRestoredState()
+                loadNewProject(uri)
+            }
+
+            REQUEST_ADD_WAV -> {
+                persistReadPermission(uri)
+                addWavToProject(uri)
             }
 
             REQUEST_EXPORT_WAV -> exportProjectTo(uri)
         }
     }
 
+    private fun persistReadPermission(uri: Uri) {
+        try {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (_: SecurityException) {
+            // Some providers grant only temporary access. The current session remains usable.
+        }
+    }
+
     private fun exportProjectTo(uri: Uri) {
         val project = projectEditor?.project ?: return
-        if (project.tracks.singleOrNull()?.clips.isNullOrEmpty() || exportInProgress) return
+        if (project.tracks.singleOrNull()?.clips.isNullOrEmpty() || exportInProgress || importInProgress) return
 
         playbackEngine.stop()
         exportInProgress = true
-        updateExportButton()
+        updateFileActionButtons()
         statusText.text = "Packing WAV bento… 0%"
 
         worker.execute {
             try {
-                val renderer = TimelineRenderer(project) { source ->
-                    WavDecoder {
-                        contentResolver.openInputStream(Uri.parse(source.location))
-                            ?: error("Android could not reopen source audio for export")
-                    }
-                }
+                val renderer = TimelineRenderer(project) { source -> decoderFor(source) }
                 val info = renderer.outputInfo
                 var lastShownPercent = -5
 
@@ -611,76 +640,41 @@ class MainActivity : Activity() {
             } catch (error: Throwable) {
                 runCatching { contentResolver.delete(uri, null, null) }
                 runOnUiThread {
-                    if (!isDestroyed) {
-                        statusText.text = "Export failed: ${error.message ?: error.javaClass.simpleName}"
-                    }
+                    if (!isDestroyed) statusText.text = "Export failed: ${error.message ?: error.javaClass.simpleName}"
                 }
             } finally {
                 runOnUiThread {
                     if (!isDestroyed) {
                         exportInProgress = false
-                        updateExportButton()
+                        updateFileActionButtons()
                     }
                 }
             }
         }
     }
 
-    private fun loadWav(uri: Uri) {
+    private fun loadNewProject(uri: Uri) {
         val generation = loadGeneration.incrementAndGet()
-        playbackEngine.stop()
-        projectEditor = null
-        waveformCache = null
-        playbackLoaded = false
-        loadedChannelCount = 0
-        loadedSourceTotalFrames = 0L
-        timelineWindowStartFrame = 0L
-        timelineWindowEndFrameExclusive = 0L
-        selectionTimelineStartFrame = null
-        selectionTimelineEndFrameExclusive = null
-        lastShownPlaybackError = null
-        statusText.text = "Reading WAV and building waveform…"
-        metadataText.text = ""
-        gainSummaryText.text = "Clip gain: waiting for audio."
-        waveformView.clearWaveform()
-        updateSelectionUi()
-        updateExportButton()
-        updatePlaybackUi()
+        resetForLoad("Reading first WAV and building waveform…")
 
         worker.execute {
             try {
-                val decoder = WavDecoder {
-                    contentResolver.openInputStream(uri) ?: error("Android could not open this document")
-                }
-                val metadata = decoder.metadata
-                val pyramid = try {
-                    WaveformPyramidBuilder.build(decoder)
-                } finally {
-                    decoder.close()
-                }
-
-                val sourceId = uri.toString()
-                val cache = InMemoryWaveformCache().put(sourceId, pyramid)
+                val loaded = decodeSource(uri, newSourceId())
                 val displayName = queryDisplayName(uri)
-                val source = AudioSource(
-                    id = sourceId,
-                    location = uri.toString(),
-                    sampleRate = metadata.info.sampleRate,
-                    channelCount = metadata.info.channelCount,
-                    totalFrames = metadata.info.totalFrames,
-                )
-                val baseProject = AudioProject(
-                    id = "brick8-project",
+                val source = loaded.source
+                val cache = InMemoryWaveformCache().put(source.id, loaded.pyramid)
+                val project = AudioProject(
+                    id = "brick9-project",
                     title = displayName,
                     timelineRate = source.sampleRate,
-                    sources = mapOf(source.id to source),
+                    sources = linkedMapOf(source.id to source),
                     tracks = listOf(
                         ProjectTrack(
                             id = TRACK_ID,
                             name = displayName,
                             clips = listOf(
                                 AudioClip(
-                                    id = INITIAL_CLIP_ID,
+                                    id = newClipId(),
                                     sourceId = source.id,
                                     sourceRange = SourceRange(0, source.totalFrames),
                                     timelineStartFrame = 0,
@@ -689,87 +683,253 @@ class MainActivity : Activity() {
                         ),
                     ),
                 )
-                val restoredProject = restoreProjectIfPossible(baseProject, source, displayName)
-
-                val details = buildString {
-                    append(displayName)
-                    append('\n')
-                    append(metadata.info.sampleRate.hz)
-                    append(" Hz • ")
-                    append(metadata.info.channelCount)
-                    append(if (metadata.info.channelCount == 1) " channel • " else " channels • ")
-                    append(metadata.bitsPerSample)
-                    append("-bit ")
-                    append(if (metadata.encoding == WavEncoding.PCM_INTEGER) "PCM" else "float")
-                    append('\n')
-                    append(formatDuration(metadata.info.totalFrames, metadata.info.sampleRate.hz))
-                    append(" • ")
-                    append(String.format(Locale.US, "%.2f MiB audio data", metadata.dataSizeBytes / 1048576.0))
-                }
 
                 runOnUiThread {
                     if (generation != loadGeneration.get() || isDestroyed) return@runOnUiThread
-                    loadedSampleRate = metadata.info.sampleRate.hz
-                    loadedChannelCount = metadata.info.channelCount
-                    loadedSourceTotalFrames = metadata.info.totalFrames
-                    waveformCache = cache
-                    metadataText.text = details
-                    projectEditor = ProjectEditor(restoredProject)
-                    clearRestoredClips()
-                    bindEditorProject("Waveform ready. Bento box armed.")
+                    installLoadedProject(project, cache)
+                    clearRestoredState()
+                    bindEditorProject("Waveform ready. Add WAV can bring in source #2.")
+                }
+            } catch (error: Throwable) {
+                showLoadFailure(generation, error)
+            }
+        }
+    }
+
+    private fun addWavToProject(uri: Uri) {
+        val initialProject = projectEditor?.project ?: return
+        if (importInProgress || exportInProgress) return
+        val generation = loadGeneration.get()
+        val expectedRate = initialProject.timelineRate
+        val expectedChannels = initialProject.sources.values.firstOrNull()?.channelCount
+            ?: return
+
+        importInProgress = true
+        updateFileActionButtons()
+        statusText.text = "Reading another WAV and building its waveform…"
+
+        worker.execute {
+            try {
+                val sourceId = newSourceId()
+                val loaded = decodeSource(uri, sourceId)
+                require(loaded.source.sampleRate == expectedRate) {
+                    "That WAV is ${loaded.source.sampleRate.hz} Hz; this project is ${expectedRate.hz} Hz. Resampling comes later."
+                }
+                require(loaded.source.channelCount == expectedChannels) {
+                    "That WAV has ${loaded.source.channelCount} channels; this project has $expectedChannels. Channel conversion comes later."
+                }
+                val displayName = queryDisplayName(uri)
+
+                runOnUiThread {
+                    if (generation != loadGeneration.get() || isDestroyed) return@runOnUiThread
+                    val editor = projectEditor ?: return@runOnUiThread
+                    val current = editor.project
+                    if (current.timelineRate != loaded.source.sampleRate ||
+                        current.sources.values.firstOrNull()?.channelCount != loaded.source.channelCount
+                    ) {
+                        statusText.text = "Project format changed while importing. Please add the WAV again."
+                        return@runOnUiThread
+                    }
+
+                    val appendAt = current.tracks.single().clips.maxOfOrNull {
+                        current.clipTimelineEndFrameExclusive(it)
+                    } ?: 0L
+                    val clip = AudioClip(
+                        id = newClipId(),
+                        sourceId = loaded.source.id,
+                        sourceRange = SourceRange(0, loaded.source.totalFrames),
+                        timelineStartFrame = appendAt,
+                    )
+                    waveformCache?.put(loaded.source.id, loaded.pyramid)
+                        ?: error("Waveform cache disappeared during import")
+                    editor.apply(AddSourceClip(TRACK_ID, loaded.source, clip))
+                    loadedSourceTotalFrames = maxOf(loadedSourceTotalFrames, loaded.source.totalFrames)
+                    bindEditorProject(
+                        "Added $displayName as source ${editor.project.sources.size}. It starts exactly after the previous last clip.",
+                    )
                 }
             } catch (error: Throwable) {
                 runOnUiThread {
-                    if (generation != loadGeneration.get() || isDestroyed) return@runOnUiThread
-                    projectEditor = null
-                    waveformCache = null
-                    playbackLoaded = false
-                    statusText.text = "Could not read/play this WAV."
-                    metadataText.text = error.message ?: error.javaClass.simpleName
-                    gainSummaryText.text = "Clip gain: unavailable."
-                    waveformView.clearWaveform()
-                    updateSelectionUi()
-                    updateExportButton()
-                    updatePlaybackUi()
+                    if (generation == loadGeneration.get() && !isDestroyed) {
+                        statusText.text = "Could not add WAV: ${error.message ?: error.javaClass.simpleName}"
+                    }
+                }
+            } finally {
+                runOnUiThread {
+                    if (!isDestroyed) {
+                        importInProgress = false
+                        updateFileActionButtons()
+                    }
                 }
             }
         }
     }
 
-    private fun restoreProjectIfPossible(
-        baseProject: AudioProject,
-        source: AudioSource,
-        displayName: String,
-    ): AudioProject {
-        val ids = restoredClipIds ?: return baseProject
-        val sourceStarts = restoredSourceStarts ?: return baseProject
-        val sourceEnds = restoredSourceEnds ?: return baseProject
-        val timelineStarts = restoredTimelineStarts ?: return baseProject
-        val gains = restoredGains ?: FloatArray(ids.size) { 1f }
-        if (
-            ids.size != sourceStarts.size ||
-            ids.size != sourceEnds.size ||
-            ids.size != timelineStarts.size ||
-            ids.size != gains.size
-        ) return baseProject
+    private fun loadRestoredProject() {
+        val sourceIds = restoredSourceIds ?: return
+        val sourceLocations = restoredSourceLocations ?: return
+        if (sourceIds.isEmpty() || sourceIds.size != sourceLocations.size) {
+            statusText.text = "Could not restore project sources."
+            return
+        }
 
-        return runCatching {
-            val clips = ids.indices.map { index ->
-                require(sourceStarts[index] >= 0)
-                require(sourceEnds[index] <= source.totalFrames)
-                require(sourceEnds[index] > sourceStarts[index])
-                require(timelineStarts[index] >= 0)
-                require(gains[index] >= 0f && gains[index].isFinite())
-                AudioClip(
-                    id = ids[index],
-                    sourceId = source.id,
-                    sourceRange = SourceRange(sourceStarts[index], sourceEnds[index]),
-                    timelineStartFrame = timelineStarts[index],
-                    gain = gains[index],
-                )
+        val generation = loadGeneration.incrementAndGet()
+        resetForLoad("Restoring project sources and waveform caches…")
+
+        worker.execute {
+            try {
+                val cache = InMemoryWaveformCache()
+                val sources = linkedMapOf<String, AudioSource>()
+                var expectedRate: Int? = null
+                var expectedChannels: Int? = null
+
+                sourceIds.indices.forEach { index ->
+                    val uri = Uri.parse(sourceLocations[index])
+                    val loaded = decodeSource(uri, sourceIds[index])
+                    val source = loaded.source
+                    if (expectedRate == null) {
+                        expectedRate = source.sampleRate.hz
+                        expectedChannels = source.channelCount
+                    } else {
+                        require(source.sampleRate.hz == expectedRate && source.channelCount == expectedChannels) {
+                            "Saved project source formats no longer match"
+                        }
+                    }
+                    sources[source.id] = source
+                    cache.put(source.id, loaded.pyramid)
+                }
+
+                val firstSource = sources.values.first()
+                val title = queryDisplayName(Uri.parse(firstSource.location))
+                val clips = restoreClips(sources)
+                val project = AudioProject(
+                    id = "brick9-project",
+                    title = title,
+                    timelineRate = firstSource.sampleRate,
+                    sources = sources,
+                    tracks = listOf(ProjectTrack(TRACK_ID, title, clips)),
+                ).validate()
+
+                runOnUiThread {
+                    if (generation != loadGeneration.get() || isDestroyed) return@runOnUiThread
+                    installLoadedProject(project, cache)
+                    clearRestoredState()
+                    bindEditorProject("Restored ${project.sources.size} source${if (project.sources.size == 1) "" else "s"} and ${clips.size} clip${if (clips.size == 1) "" else "s"}.")
+                }
+            } catch (error: Throwable) {
+                showLoadFailure(generation, error)
             }
-            baseProject.copy(tracks = listOf(ProjectTrack(TRACK_ID, displayName, clips))).validate()
-        }.getOrElse { baseProject }
+        }
+    }
+
+    private fun restoreClips(sources: Map<String, AudioSource>): List<AudioClip> {
+        val ids = restoredClipIds ?: arrayListOf()
+        val sourceIds = restoredClipSourceIds ?: arrayListOf()
+        val sourceStarts = restoredSourceStarts ?: LongArray(0)
+        val sourceEnds = restoredSourceEnds ?: LongArray(0)
+        val timelineStarts = restoredTimelineStarts ?: LongArray(0)
+        val gains = restoredGains ?: FloatArray(ids.size) { 1f }
+        require(
+            ids.size == sourceIds.size &&
+                ids.size == sourceStarts.size &&
+                ids.size == sourceEnds.size &&
+                ids.size == timelineStarts.size &&
+                ids.size == gains.size,
+        ) { "Saved clip metadata is incomplete" }
+
+        return ids.indices.map { index ->
+            val source = sources[sourceIds[index]] ?: error("Saved clip references a missing source")
+            require(sourceStarts[index] >= 0 && sourceEnds[index] <= source.totalFrames)
+            require(sourceEnds[index] > sourceStarts[index])
+            require(timelineStarts[index] >= 0)
+            require(gains[index] >= 0f && gains[index].isFinite())
+            AudioClip(
+                id = ids[index],
+                sourceId = source.id,
+                sourceRange = SourceRange(sourceStarts[index], sourceEnds[index]),
+                timelineStartFrame = timelineStarts[index],
+                gain = gains[index],
+            )
+        }.sortedBy { it.timelineStartFrame }
+    }
+
+    private data class LoadedSource(
+        val source: AudioSource,
+        val pyramid: WaveformPyramid,
+    )
+
+    private fun decodeSource(uri: Uri, sourceId: String): LoadedSource {
+        val decoder = WavDecoder {
+            contentResolver.openInputStream(uri) ?: error("Android could not open this document")
+        }
+        val metadata = decoder.metadata
+        val pyramid = try {
+            WaveformPyramidBuilder.build(decoder)
+        } finally {
+            decoder.close()
+        }
+        return LoadedSource(
+            source = AudioSource(
+                id = sourceId,
+                location = uri.toString(),
+                sampleRate = metadata.info.sampleRate,
+                channelCount = metadata.info.channelCount,
+                totalFrames = metadata.info.totalFrames,
+            ),
+            pyramid = pyramid,
+        )
+    }
+
+    private fun decoderFor(source: AudioSource): WavDecoder = WavDecoder {
+        contentResolver.openInputStream(Uri.parse(source.location))
+            ?: error("Android could not reopen source audio")
+    }
+
+    private fun resetForLoad(message: String) {
+        playbackEngine.stop()
+        projectEditor = null
+        waveformCache = null
+        playbackLoaded = false
+        exportInProgress = false
+        importInProgress = false
+        loadedChannelCount = 0
+        loadedSourceTotalFrames = 0L
+        timelineWindowStartFrame = 0L
+        timelineWindowEndFrameExclusive = 0L
+        selectionTimelineStartFrame = null
+        selectionTimelineEndFrameExclusive = null
+        lastShownPlaybackError = null
+        statusText.text = message
+        metadataText.text = ""
+        gainSummaryText.text = "Clip gain: waiting for audio."
+        waveformView.clearWaveform()
+        updateSelectionUi()
+        updateFileActionButtons()
+        updatePlaybackUi()
+    }
+
+    private fun installLoadedProject(project: AudioProject, cache: InMemoryWaveformCache) {
+        projectEditor = ProjectEditor(project)
+        waveformCache = cache
+        loadedSampleRate = project.timelineRate.hz
+        loadedChannelCount = project.sources.values.firstOrNull()?.channelCount ?: 0
+        loadedSourceTotalFrames = project.sources.values.maxOfOrNull { it.totalFrames } ?: 0L
+    }
+
+    private fun showLoadFailure(generation: Int, error: Throwable) {
+        runOnUiThread {
+            if (generation != loadGeneration.get() || isDestroyed) return@runOnUiThread
+            projectEditor = null
+            waveformCache = null
+            playbackLoaded = false
+            statusText.text = "Could not load project audio."
+            metadataText.text = error.message ?: error.javaClass.simpleName
+            gainSummaryText.text = "Clip gain: unavailable."
+            waveformView.clearWaveform()
+            updateSelectionUi()
+            updateFileActionButtons()
+            updatePlaybackUi()
+        }
     }
 
     private fun bindEditorProject(
@@ -799,7 +959,7 @@ class MainActivity : Activity() {
 
         waveformView.setTimeline(
             cache = cache,
-            channelCount = loadedChannelCount,
+            channelCount = loadedChannelCount.coerceAtLeast(1),
             clips = timelineWaveformClips(project),
             visibleTimelineStartFrame = timelineWindowStartFrame,
             visibleTimelineEndFrameExclusive = timelineWindowEndFrameExclusive,
@@ -816,9 +976,10 @@ class MainActivity : Activity() {
         }
 
         statusText.text = statusMessage
+        updateMetadataSummary(project)
         updateGainSummary(project)
         updateSelectionUi()
-        updateExportButton()
+        updateFileActionButtons()
         updatePlaybackUi()
     }
 
@@ -834,6 +995,29 @@ class MainActivity : Activity() {
                 gain = clip.gain,
             )
         }
+
+    private fun updateMetadataSummary(project: AudioProject) {
+        val sourceCount = project.sources.size
+        val channelCount = project.sources.values.firstOrNull()?.channelCount ?: 0
+        val channelText = when (channelCount) {
+            1 -> "mono"
+            2 -> "stereo"
+            else -> "$channelCount channels"
+        }
+        metadataText.text = buildString {
+            append(project.title)
+            append('\n')
+            append(sourceCount)
+            append(if (sourceCount == 1) " source • " else " sources • ")
+            append(project.timelineRate.hz)
+            append(" Hz • ")
+            append(channelText)
+            append('\n')
+            append(project.tracks.single().clips.size)
+            append(" timeline clip")
+            if (project.tracks.single().clips.size != 1) append('s')
+        }
+    }
 
     private fun updateGainSummary(project: AudioProject) {
         val clips = project.tracks.single().clips.sortedBy { it.timelineStartFrame }
@@ -884,22 +1068,25 @@ class MainActivity : Activity() {
         updateHistoryButtons()
     }
 
-    private fun updateExportButton() {
-        if (!::exportButton.isInitialized) return
+    private fun updateFileActionButtons() {
+        if (!::exportButton.isInitialized || !::addWavButton.isInitialized) return
+        val hasProject = projectEditor != null
         val hasAudio = projectEditor?.project?.tracks?.singleOrNull()?.clips?.isNotEmpty() == true
-        exportButton.isEnabled = hasAudio && !exportInProgress
+        addWavButton.isEnabled = hasProject && !importInProgress && !exportInProgress
+        addWavButton.text = if (importInProgress) "Adding…" else "Add WAV"
+        exportButton.isEnabled = hasAudio && !exportInProgress && !importInProgress
         exportButton.text = if (exportInProgress) "Exporting…" else "Export WAV"
     }
 
     private fun updateHistoryButtons() {
         if (!::undoButton.isInitialized || !::redoButton.isInitialized) return
-        undoButton.isEnabled = projectEditor?.canUndo == true
-        redoButton.isEnabled = projectEditor?.canRedo == true
+        undoButton.isEnabled = projectEditor?.canUndo == true && !importInProgress && !exportInProgress
+        redoButton.isEnabled = projectEditor?.canRedo == true && !importInProgress && !exportInProgress
     }
 
     private fun updatePlaybackUi() {
         if (!::playPauseButton.isInitialized) return
-        playPauseButton.isEnabled = playbackLoaded
+        playPauseButton.isEnabled = playbackLoaded && !exportInProgress
         playPauseButton.text = if (playbackEngine.state == PlaybackState.PLAYING) "Pause" else "Play"
         stopButton.isEnabled = playbackLoaded &&
             (playbackEngine.state != PlaybackState.STOPPED || playbackEngine.playheadFrame > timelineWindowStartFrame)
@@ -972,8 +1159,13 @@ class MainActivity : Activity() {
 
     private fun newClipId(): String = "clip-${UUID.randomUUID()}"
 
-    private fun clearRestoredClips() {
+    private fun newSourceId(): String = "source-${UUID.randomUUID()}"
+
+    private fun clearRestoredState() {
+        restoredSourceIds = null
+        restoredSourceLocations = null
         restoredClipIds = null
+        restoredClipSourceIds = null
         restoredSourceStarts = null
         restoredSourceEnds = null
         restoredTimelineStarts = null
@@ -990,9 +1182,14 @@ class MainActivity : Activity() {
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
-        selectedUri?.let { outState.putString(STATE_SELECTED_URI, it) }
-        projectEditor?.project?.tracks?.singleOrNull()?.clips?.let { clips ->
+        projectEditor?.project?.let { project ->
+            val sources = project.sources.values.toList()
+            outState.putStringArrayList(STATE_SOURCE_IDS, ArrayList(sources.map { it.id }))
+            outState.putStringArrayList(STATE_SOURCE_LOCATIONS, ArrayList(sources.map { it.location }))
+
+            val clips = project.tracks.singleOrNull()?.clips.orEmpty()
             outState.putStringArrayList(STATE_CLIP_IDS, ArrayList(clips.map { it.id }))
+            outState.putStringArrayList(STATE_CLIP_SOURCE_IDS, ArrayList(clips.map { it.sourceId }))
             outState.putLongArray(STATE_CLIP_SOURCE_STARTS, clips.map { it.sourceRange.startFrame }.toLongArray())
             outState.putLongArray(STATE_CLIP_SOURCE_ENDS, clips.map { it.sourceRange.endFrameExclusive }.toLongArray())
             outState.putLongArray(STATE_CLIP_TIMELINE_STARTS, clips.map { it.timelineStartFrame }.toLongArray())
@@ -1012,14 +1209,16 @@ class MainActivity : Activity() {
     companion object {
         private const val REQUEST_OPEN_WAV = 2001
         private const val REQUEST_EXPORT_WAV = 2002
-        private const val STATE_SELECTED_URI = "selected_wav_uri"
+        private const val REQUEST_ADD_WAV = 2003
+        private const val STATE_SOURCE_IDS = "source_ids"
+        private const val STATE_SOURCE_LOCATIONS = "source_locations"
         private const val STATE_CLIP_IDS = "clip_ids"
+        private const val STATE_CLIP_SOURCE_IDS = "clip_source_ids"
         private const val STATE_CLIP_SOURCE_STARTS = "clip_source_starts"
         private const val STATE_CLIP_SOURCE_ENDS = "clip_source_ends"
         private const val STATE_CLIP_TIMELINE_STARTS = "clip_timeline_starts"
         private const val STATE_CLIP_GAINS = "clip_gains"
         private const val TRACK_ID = "track-1"
-        private const val INITIAL_CLIP_ID = "clip-1"
         private const val HIGH_GAIN_WARNING_DB = 24f
     }
 }
