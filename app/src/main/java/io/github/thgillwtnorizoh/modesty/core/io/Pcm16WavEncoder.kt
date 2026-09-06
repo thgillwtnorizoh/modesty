@@ -28,10 +28,11 @@ class Pcm16WavEncoder(
         require(totalFrames > 0) { "WAV export needs at least one frame" }
 
         val blockAlign = channelCount * BYTES_PER_SAMPLE
+        require(totalFrames <= (UINT32_MAX - 36L) / blockAlign) {
+            "WAV export exceeds RIFF's 4 GiB container limit; RF64 is not supported yet"
+        }
         val dataSize = totalFrames * blockAlign.toLong()
-        require(dataSize <= UINT32_MAX) { "WAV export exceeds RIFF's 4 GiB data limit; RF64 is not supported yet" }
         val riffSize = 36L + dataSize
-        require(riffSize <= UINT32_MAX) { "WAV export exceeds RIFF's 4 GiB container limit; RF64 is not supported yet" }
 
         output.writeAscii("RIFF")
         output.writeUInt32LE(riffSize)
