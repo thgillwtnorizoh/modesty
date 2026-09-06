@@ -24,15 +24,22 @@ The foundation is being built and tested one brick at a time:
 - offline timeline renderer shared with export
 - seekless PCM16 RIFF/WAVE encoder for Android document providers
 - multiple immutable WAV sources in one project
+- configuration-retained live editor history and waveform cache
 - Android shell kept dependency-light
 
 The project currently targets `compileSdk 36` / `targetSdk 36` and uses JDK 17. This is intentional while the core is being established so CI does not depend on API 37 tooling.
 
 ## Current brick
 
-**Brick #9: second-source WAV import**
+**Brick #9.1: multisource polish**
 
-The Android shell can now:
+Brick #9.1 closes three issues found during device testing before Quick Join is built on top:
+
+- Trim now targets any one clip that fully contains the selection, even when other clips and sources exist elsewhere on the track. A selection spanning a gap or multiple clips remains intentionally ambiguous and does not enable Trim.
+- Android configuration recreation retains the live `ProjectEditor`, undo/redo stacks, waveform cache, source-format metadata, and current selection. Rotating the device therefore no longer destroys edit history or forces waveform caches to be rebuilt.
+- Per-source WAV information is visible again, including filename, sample rate, mono/stereo layout, bit depth, and PCM/float encoding.
+
+The Android shell can:
 
 - open a WAV as a new project
 - add another WAV without replacing the current project
@@ -40,15 +47,16 @@ The Android shell can now:
 - append the new source after the current last clip on the existing track
 - build and retain a separate waveform pyramid for each source
 - play across source boundaries using the existing timeline playback engine
-- edit imported clips with the same split, delete, move, amplify, undo, and redo operations
-- export all participating sources through the same Brick #8 offline renderer
-- persist all current source locations, source identities, and clip-to-source references across Android configuration recreation
+- trim one selected clip in a multisource project
+- split, delete, move, and amplify imported clips with the same editor operations
+- undo and redo edits across screen rotation
+- export all participating sources through the same offline renderer
 
-`AddSourceClip` is a real editor operation. It adds the immutable source and its first clip to project state as one history entry, so Undo removes both and Redo restores both. Quick Join can later call this same operation instead of maintaining a second join implementation.
+`AddSourceClip` remains a real editor operation. It adds the immutable source and its first clip to project state as one history entry, so Undo removes both and Redo restores both. The retained configuration session also preserves waveform data for a source that currently exists only in Redo history, so `Add B → Undo → rotate → Redo` remains valid.
 
-Brick #9 intentionally requires imported WAVs to match the project's current sample rate and channel count. A 48 kHz stereo project accepts another 48 kHz stereo WAV; mismatched rates or channel layouts are refused with a clear message until resampling and channel conversion exist. Clips remain non-overlapping on one track for now.
+Process death is intentionally different from configuration recreation. Saved-instance reconstruction restores the current project and reopens its source files, but edit history is not yet durable project data and is not promised after the app process is killed.
 
-Source IDs are independent from Android document URIs. This means the same WAV can be imported more than once as distinct project sources while all decoded audio still comes from the original persisted document locations.
+Brick #9 still intentionally requires imported WAVs to match the project's current sample rate and channel count. A 48 kHz stereo project accepts another 48 kHz stereo WAV; mismatched rates or channel layouts are refused until resampling and channel conversion exist. Clips remain non-overlapping on one track for now.
 
 Currently supported input WAV sample encodings:
 
@@ -62,7 +70,7 @@ Export remains standard 16-bit PCM WAV, preserving the project sample rate and m
 
 Open audio → waveform → select → trim / split / move / amplify → undo / redo → export.
 
-Brick #8 reached that end-to-end target. Brick #9 extends the same path to more than one input source and lays the direct foundation for Quick Join.
+Brick #8 reached that end-to-end target. Brick #9 extended the same path to multiple input sources. Brick #9.1 seals the device-test regressions before Quick Join becomes the friendly front door to that machinery.
 
 Quick Trim, Quick Amplify, and Quick Join will sit on top of these same editor and renderer operations.
 
