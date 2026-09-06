@@ -8,7 +8,6 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import io.github.thgillwtnorizoh.modesty.core.waveform.WaveformCache
-import kotlin.math.abs
 import kotlin.math.roundToLong
 
 class WaveformView(context: Context) : View(context) {
@@ -57,7 +56,10 @@ class WaveformView(context: Context) : View(context) {
     private var selectionStartSourceFrame: Long? = null
     private var selectionEndSourceFrameExclusive: Long? = null
     private var downX: Float = 0f
-    private var draggingSelection = false
+    private var downY: Float = 0f
+    private var gestureIntent = WaveformGestureIntent.UNDECIDED
+    private var selectionBeforeGestureStart: Long? = null
+    private var selectionBeforeGestureEnd: Long? = null
 
     var onSeekRequested: ((Long) -> Unit)? = null
     var onSelectionChanged: ((Long?, Long?) -> Unit)? = null
@@ -231,35 +233,79 @@ class WaveformView(context: Context) : View(context) {
         return when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 downX = event.x
-                draggingSelection = false
+                downY = event.y
+                gestureIntent = WaveformGestureIntent.UNDECIDED
+                selectionBeforeGestureStart = selectionStartSourceFrame
+                selectionBeforeGestureEnd = selectionEndSourceFrameExclusive
+
+                // Keep the parent ScrollView from stealing the gesture before we know whether the
+                // user means horizontal selection or vertical page scrolling.
+                parent?.requestDisallowInterceptTouchEvent(true)
                 true
             }
 
             MotionEvent.ACTION_MOVE -> {
-                if (!draggingSelection && abs(event.x - downX) >= touchSlop) {
-                    draggingSelection = true
+                if (gestureIntent == WaveformGestureIntent.UNDECIDED) {
+                    gestureIntent = WaveformGestureArbiter.classify(
+                        deltaX = event.x - downX,
+                        deltaY = event.y - downY,
+                        touchSlop = touchSlop,
+                    )
+
+                    if (gestureIntent == WaveformGestureIntent.SCROLL) {
+                        // Hand the gesture back to the ScrollView. The next MOVE may be intercepted,
+                        // which will deliver ACTION_CANCEL here. That cancel must not erase an
+                        // already committed selection.
+                        parent?.requestDisallowInterceptTouchEvent(false)
+                    }
                 }
-                if (draggingSelection) updateSelectionFromXs(downX, event.x, notify = true)
+
+                when (gestureIntent) {
+                    WaveformGestureIntent.SELECT -> {
+                        parent?.requestDisallowInterceptTouchEvent(true)
+                        updateSelectionFromXs(downX, event.x, notify = true)
+                    }
+
+                    WaveformGestureIntent.SCROLL -> {
+                        parent?.requestDisallowInterceptTouchEvent(false)
+                    }
+
+                    WaveformGestureIntent.UNDECIDED -> Unit
+                }
                 true
             }
 
             MotionEvent.ACTION_UP -> {
-                if (draggingSelection) {
-                    updateSelectionFromXs(downX, event.x, notify = true)
-                    draggingSelection = false
-                } else {
-                    clearSelectionInternal(notify = true)
-                    val frame = timelineFrameAtX(event.x)
-                    setPlayheadFrame(frame)
-                    onSeekRequested?.invoke(frame)
-                    performClick()
+                when (gestureIntent) {
+                    WaveformGestureIntent.SELECT -> {
+                        updateSelectionFromXs(downX, event.x, notify = true)
+                    }
+
+                    WaveformGestureIntent.SCROLL -> {
+                        // Deliberately do nothing. Vertical scrolling must not alter selection.
+                    }
+
+                    WaveformGestureIntent.UNDECIDED -> {
+                        clearSelectionInternal(notify = true)
+                        val frame = timelineFrameAtX(event.x)
+                        setPlayheadFrame(frame)
+                        onSeekRequested?.invoke(frame)
+                        performClick()
+                    }
                 }
+
+                parent?.requestDisallowInterceptTouchEvent(false)
+                gestureIntent = WaveformGestureIntent.UNDECIDED
                 true
             }
 
             MotionEvent.ACTION_CANCEL -> {
-                draggingSelection = false
-                clearSelectionInternal(notify = true)
+                // Cancellation often means the parent ScrollView took over. Preserve the selection
+                // that existed before this gesture rather than turning ordinary thumb jitter into
+                // destructive UI behaviour.
+                restoreSelectionBeforeGesture()
+                parent?.requestDisallowInterceptTouchEvent(false)
+                gestureIntent = WaveformGestureIntent.UNDECIDED
                 true
             }
 
@@ -286,6 +332,17 @@ class WaveformView(context: Context) : View(context) {
         selectionStartSourceFrame = low
         selectionEndSourceFrameExclusive = high
         if (notify) onSelectionChanged?.invoke(low, high)
+        invalidate()
+    }
+
+    private fun restoreSelectionBeforeGesture() {
+        val start = selectionBeforeGestureStart
+        val end = selectionBeforeGestureEnd
+        if (selectionStartSourceFrame == start && selectionEndSourceFrameExclusive == end) return
+
+        selectionStartSourceFrame = start
+        selectionEndSourceFrameExclusive = end
+        onSelectionChanged?.invoke(start, end)
         invalidate()
     }
 
