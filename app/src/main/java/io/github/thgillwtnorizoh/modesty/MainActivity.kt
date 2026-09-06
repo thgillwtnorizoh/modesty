@@ -19,13 +19,13 @@ import android.widget.ScrollView
 import android.widget.TextView
 import io.github.thgillwtnorizoh.modesty.core.dsp.decibelsToLinearGain
 import io.github.thgillwtnorizoh.modesty.core.dsp.linearGainToDecibels
-import io.github.thgillwtnorizoh.modesty.core.editing.AddSourceClip
 import io.github.thgillwtnorizoh.modesty.core.editing.AmplifyTimelineRange
 import io.github.thgillwtnorizoh.modesty.core.editing.DeleteTimelineRange
 import io.github.thgillwtnorizoh.modesty.core.editing.MoveClip
 import io.github.thgillwtnorizoh.modesty.core.editing.ProjectEditor
 import io.github.thgillwtnorizoh.modesty.core.editing.SplitTimelineRange
 import io.github.thgillwtnorizoh.modesty.core.editing.TrimClip
+import io.github.thgillwtnorizoh.modesty.core.editing.appendWholeSourceAtEndOperation
 import io.github.thgillwtnorizoh.modesty.core.editing.clipContainingTimelineRange
 import io.github.thgillwtnorizoh.modesty.core.editing.clipMoveBounds
 import io.github.thgillwtnorizoh.modesty.core.io.Pcm16WavEncoder
@@ -57,6 +57,7 @@ class MainActivity : Activity() {
     private lateinit var waveformView: WaveformView
     private lateinit var playPauseButton: Button
     private lateinit var stopButton: Button
+    private lateinit var quickJoinButton: Button
     private lateinit var addWavButton: Button
     private lateinit var trimButton: Button
     private lateinit var splitButton: Button
@@ -80,6 +81,7 @@ class MainActivity : Activity() {
     private var playbackLoaded = false
     private var exportInProgress = false
     private var importInProgress = false
+    private var quickJoinStage = QuickJoinStage.IDLE
     private var loadedSampleRate = 48_000
     private var loadedChannelCount = 0
     private var loadedSourceTotalFrames = 0L
@@ -119,19 +121,26 @@ class MainActivity : Activity() {
             waveformCache = retained.waveformCache
             sourceFormats.clear()
             sourceFormats.putAll(retained.sourceFormats)
+            quickJoinStage = retained.quickJoinStage
             val project = retained.editor.project
             loadedSampleRate = project.timelineRate.hz
             loadedChannelCount = project.sources.values.firstOrNull()?.channelCount ?: 0
             loadedSourceTotalFrames = retained.loadedSourceTotalFrames
             clearRestoredState()
             bindEditorProject(
-                statusMessage = "Restored live editor session after rotation. Undo/Redo history preserved.",
+                statusMessage = if (quickJoinStage == QuickJoinStage.IDLE) {
+                    "Restored live editor session after rotation. Undo/Redo history preserved."
+                } else {
+                    "Restored live Quick Join session after rotation."
+                },
                 preservedSelection = retained.selectionStart?.let { start ->
                     retained.selectionEnd?.let { end -> start to end }
                 },
             )
         } else if (!restoredSourceIds.isNullOrEmpty() && !restoredSourceLocations.isNullOrEmpty()) {
             loadRestoredProject()
+        } else {
+            updateFileActionButtons()
         }
     }
 
@@ -145,6 +154,9 @@ class MainActivity : Activity() {
         restoredSourceEnds = state.getLongArray(STATE_CLIP_SOURCE_ENDS)
         restoredTimelineStarts = state.getLongArray(STATE_CLIP_TIMELINE_STARTS)
         restoredGains = state.getFloatArray(STATE_CLIP_GAINS)
+        quickJoinStage = state.getString(STATE_QUICK_JOIN_STAGE)
+            ?.let { name -> runCatching { QuickJoinStage.valueOf(name) }.getOrNull() }
+            ?: QuickJoinStage.IDLE
     }
 
     private fun buildContent(): ScrollView {
@@ -161,11 +173,17 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
         })
         root.addView(TextView(this).apply {
-            text = "Foundation brick 9.1\nSeal the cracks before the next floor."
+            text = "Foundation brick 10\nQuick Join has entered the building."
             textSize = 16f
             gravity = Gravity.CENTER
-            setPadding(0, dp(6), 0, dp(18))
+            setPadding(0, dp(6), 0, dp(12))
         })
+
+        quickJoinButton = Button(this).apply {
+            text = "Quick Join"
+            setOnClickListener { beginQuickJoin() }
+        }
+        root.addView(quickJoinButton)
 
         val fileControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -173,7 +191,11 @@ class MainActivity : Activity() {
         }
         fileControls.addView(Button(this).apply {
             text = "Open WAV"
-            setOnClickListener { chooseWav(REQUEST_OPEN_WAV) }
+            setOnClickListener {
+                quickJoinStage = QuickJoinStage.IDLE
+                updateFileActionButtons()
+                chooseWav(REQUEST_OPEN_WAV)
+            }
         })
         addWavButton = Button(this).apply {
             text = "Add WAV"
@@ -184,7 +206,7 @@ class MainActivity : Activity() {
         root.addView(fileControls)
 
         statusText = TextView(this).apply {
-            text = "Open a WAV to start a project, then Add WAV to append another source."
+            text = "Quick Join picks A then B. Open WAV and Add WAV remain the normal editor doors."
             textSize = 15f
             gravity = Gravity.CENTER
             setPadding(0, dp(16), 0, dp(8))
@@ -323,7 +345,7 @@ class MainActivity : Activity() {
         root.addView(historyControls)
 
         root.addView(TextView(this).apply {
-            text = "Brick #9.1 restores per-source WAV format details, allows Trim inside any one clip, and keeps live undo/redo history across configuration rotation. Process-death restoration still restores current project state without promising edit history."
+            text = "Brick #10 Quick Join is only a two-picker front door into the existing project editor. B is appended with the same operation used by Add WAV, then preview/edit/export use the normal playback and renderer paths."
             textSize = 12f
             gravity = Gravity.CENTER
             setPadding(0, dp(12), 0, 0)
@@ -550,6 +572,30 @@ class MainActivity : Activity() {
         bindEditorProject("Redo restored the next project state.")
     }
 
+    private fun beginQuickJoin() {
+        if (importInProgress || exportInProgress || quickJoinStage != QuickJoinStage.IDLE) return
+        quickJoinStage = QuickJoinStage.PICKING_FIRST
+        statusText.text = "Quick Join: choose WAV A."
+        updateFileActionButtons()
+        chooseWav(REQUEST_QUICK_JOIN_FIRST)
+    }
+
+    private fun handlePickerCanceled(requestCode: Int) {
+        when (requestCode) {
+            REQUEST_QUICK_JOIN_FIRST -> {
+                quickJoinStage = QuickJoinStage.IDLE
+                statusText.text = "Quick Join canceled before A. Your existing project was not changed."
+                updateFileActionButtons()
+            }
+
+            REQUEST_QUICK_JOIN_SECOND -> {
+                quickJoinStage = QuickJoinStage.IDLE
+                statusText.text = "Quick Join stopped after A. A remains open as a normal editable project."
+                updateFileActionButtons()
+            }
+        }
+    }
+
     private fun chooseWav(requestCode: Int) {
         if (requestCode == REQUEST_ADD_WAV && (projectEditor == null || importInProgress || exportInProgress)) return
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -566,7 +612,12 @@ class MainActivity : Activity() {
 
     private fun chooseExportWav() {
         val project = projectEditor?.project ?: return
-        if (project.tracks.singleOrNull()?.clips.isNullOrEmpty() || exportInProgress || importInProgress) return
+        if (
+            project.tracks.singleOrNull()?.clips.isNullOrEmpty() ||
+            exportInProgress ||
+            importInProgress ||
+            quickJoinStage != QuickJoinStage.IDLE
+        ) return
         val stem = project.title.substringBeforeLast('.', project.title).ifBlank { "modesty-export" }
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
@@ -580,11 +631,15 @@ class MainActivity : Activity() {
     @Deprecated("Legacy Activity callback keeps the foundation dependency-free")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (resultCode != RESULT_OK) return
-        val uri = data?.data ?: return
+        if (resultCode != RESULT_OK || data?.data == null) {
+            handlePickerCanceled(requestCode)
+            return
+        }
+        val uri = data.data ?: return
 
         when (requestCode) {
             REQUEST_OPEN_WAV -> {
+                quickJoinStage = QuickJoinStage.IDLE
                 persistReadPermission(uri)
                 clearRestoredState()
                 loadNewProject(uri)
@@ -593,6 +648,21 @@ class MainActivity : Activity() {
             REQUEST_ADD_WAV -> {
                 persistReadPermission(uri)
                 addWavToProject(uri)
+            }
+
+            REQUEST_QUICK_JOIN_FIRST -> {
+                persistReadPermission(uri)
+                clearRestoredState()
+                quickJoinStage = QuickJoinStage.LOADING_FIRST
+                updateFileActionButtons()
+                loadNewProject(uri, quickJoinFirst = true)
+            }
+
+            REQUEST_QUICK_JOIN_SECOND -> {
+                persistReadPermission(uri)
+                quickJoinStage = QuickJoinStage.LOADING_SECOND
+                updateFileActionButtons()
+                addWavToProject(uri, quickJoinSecond = true)
             }
 
             REQUEST_EXPORT_WAV -> exportProjectTo(uri)
@@ -666,9 +736,12 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun loadNewProject(uri: Uri) {
+    private fun loadNewProject(uri: Uri, quickJoinFirst: Boolean = false) {
         val generation = loadGeneration.incrementAndGet()
-        resetForLoad("Reading first WAV and building waveform…")
+        resetForLoad(
+            if (quickJoinFirst) "Quick Join: reading WAV A and building its waveform…"
+            else "Reading first WAV and building waveform…",
+        )
 
         worker.execute {
             try {
@@ -677,7 +750,7 @@ class MainActivity : Activity() {
                 val source = loaded.source
                 val cache = InMemoryWaveformCache().put(source.id, loaded.pyramid)
                 val project = AudioProject(
-                    id = "brick9-project",
+                    id = "brick10-project",
                     title = displayName,
                     timelineRate = source.sampleRate,
                     sources = linkedMapOf(source.id to source),
@@ -703,15 +776,21 @@ class MainActivity : Activity() {
                     sourceFormats[source.id] = loaded.format
                     installLoadedProject(project, cache)
                     clearRestoredState()
-                    bindEditorProject("Waveform ready. Add WAV can bring in source #2.")
+                    if (quickJoinFirst) {
+                        quickJoinStage = QuickJoinStage.PICKING_SECOND
+                        bindEditorProject("Quick Join: $displayName is A. Now choose WAV B.")
+                        chooseWav(REQUEST_QUICK_JOIN_SECOND)
+                    } else {
+                        bindEditorProject("Waveform ready. Add WAV can bring in another source.")
+                    }
                 }
             } catch (error: Throwable) {
-                showLoadFailure(generation, error)
+                showLoadFailure(generation, error, resetQuickJoin = quickJoinFirst)
             }
         }
     }
 
-    private fun addWavToProject(uri: Uri) {
+    private fun addWavToProject(uri: Uri, quickJoinSecond: Boolean = false) {
         val initialProject = projectEditor?.project ?: return
         if (importInProgress || exportInProgress) return
         val generation = loadGeneration.get()
@@ -720,7 +799,11 @@ class MainActivity : Activity() {
 
         importInProgress = true
         updateFileActionButtons()
-        statusText.text = "Reading another WAV and building its waveform…"
+        statusText.text = if (quickJoinSecond) {
+            "Quick Join: reading WAV B and building its waveform…"
+        } else {
+            "Reading another WAV and building its waveform…"
+        }
 
         worker.execute {
             try {
@@ -738,35 +821,52 @@ class MainActivity : Activity() {
                     if (generation != loadGeneration.get() || isDestroyed) return@runOnUiThread
                     val editor = projectEditor ?: return@runOnUiThread
                     val current = editor.project
-                    if (current.timelineRate != loaded.source.sampleRate ||
+                    if (
+                        current.timelineRate != loaded.source.sampleRate ||
                         current.sources.values.firstOrNull()?.channelCount != loaded.source.channelCount
                     ) {
-                        statusText.text = "Project format changed while importing. Please add the WAV again."
+                        if (quickJoinSecond) quickJoinStage = QuickJoinStage.IDLE
+                        statusText.text = if (quickJoinSecond) {
+                            "Quick Join stopped because the project format changed. A remains editable."
+                        } else {
+                            "Project format changed while importing. Please add the WAV again."
+                        }
+                        updateFileActionButtons()
                         return@runOnUiThread
                     }
 
-                    val appendAt = current.tracks.single().clips.maxOfOrNull {
-                        current.clipTimelineEndFrameExclusive(it)
-                    } ?: 0L
-                    val clip = AudioClip(
-                        id = newClipId(),
-                        sourceId = loaded.source.id,
-                        sourceRange = SourceRange(0, loaded.source.totalFrames),
-                        timelineStartFrame = appendAt,
-                    )
                     waveformCache?.put(loaded.source.id, loaded.pyramid)
                         ?: error("Waveform cache disappeared during import")
                     sourceFormats[loaded.source.id] = loaded.format
-                    editor.apply(AddSourceClip(TRACK_ID, loaded.source, clip))
-                    loadedSourceTotalFrames = maxOf(loadedSourceTotalFrames, loaded.source.totalFrames)
-                    bindEditorProject(
-                        "Added $displayName as source ${editor.project.sources.size}. It starts exactly after the previous last clip.",
+                    editor.apply(
+                        current.appendWholeSourceAtEndOperation(
+                            trackId = TRACK_ID,
+                            source = loaded.source,
+                            clipId = newClipId(),
+                        ),
                     )
+                    loadedSourceTotalFrames = maxOf(loadedSourceTotalFrames, loaded.source.totalFrames)
+                    if (quickJoinSecond) {
+                        quickJoinStage = QuickJoinStage.IDLE
+                        bindEditorProject(
+                            "Quick Join ready: A + $displayName. Preview it, edit if needed, then Export WAV.",
+                        )
+                    } else {
+                        bindEditorProject(
+                            "Added $displayName as source ${editor.project.sources.size}. It starts exactly after the previous last clip.",
+                        )
+                    }
                 }
             } catch (error: Throwable) {
                 runOnUiThread {
                     if (generation == loadGeneration.get() && !isDestroyed) {
-                        statusText.text = "Could not add WAV: ${error.message ?: error.javaClass.simpleName}"
+                        if (quickJoinSecond) {
+                            quickJoinStage = QuickJoinStage.IDLE
+                            statusText.text =
+                                "Quick Join could not add B: ${error.message ?: error.javaClass.simpleName}. A remains editable."
+                        } else {
+                            statusText.text = "Could not add WAV: ${error.message ?: error.javaClass.simpleName}"
+                        }
                     }
                 }
             } finally {
@@ -820,7 +920,7 @@ class MainActivity : Activity() {
                 val title = formats[firstSource.id]?.displayName ?: "Restored WAV"
                 val clips = restoreClips(sources)
                 val project = AudioProject(
-                    id = "brick9-project",
+                    id = "brick10-project",
                     title = title,
                     timelineRate = firstSource.sampleRate,
                     sources = sources,
@@ -838,7 +938,7 @@ class MainActivity : Activity() {
                     )
                 }
             } catch (error: Throwable) {
-                showLoadFailure(generation, error)
+                showLoadFailure(generation, error, resetQuickJoin = true)
             }
         }
     }
@@ -874,6 +974,14 @@ class MainActivity : Activity() {
         }.sortedBy { it.timelineStartFrame }
     }
 
+    private enum class QuickJoinStage {
+        IDLE,
+        PICKING_FIRST,
+        LOADING_FIRST,
+        PICKING_SECOND,
+        LOADING_SECOND,
+    }
+
     private data class SourceFormatInfo(
         val displayName: String,
         val bitsPerSample: Int,
@@ -893,6 +1001,7 @@ class MainActivity : Activity() {
         val loadedSourceTotalFrames: Long,
         val selectionStart: Long?,
         val selectionEnd: Long?,
+        val quickJoinStage: QuickJoinStage,
     )
 
     private fun decodeSource(uri: Uri, sourceId: String): LoadedSource {
@@ -963,15 +1072,20 @@ class MainActivity : Activity() {
         loadedSourceTotalFrames = project.sources.values.maxOfOrNull { it.totalFrames } ?: 0L
     }
 
-    private fun showLoadFailure(generation: Int, error: Throwable) {
+    private fun showLoadFailure(generation: Int, error: Throwable, resetQuickJoin: Boolean = false) {
         runOnUiThread {
             if (generation != loadGeneration.get() || isDestroyed) return@runOnUiThread
+            if (resetQuickJoin) quickJoinStage = QuickJoinStage.IDLE
             projectEditor = null
             waveformCache = null
             sourceFormats.clear()
             playbackLoaded = false
-            statusText.text = "Could not load project audio."
-            metadataText.text = error.message ?: error.javaClass.simpleName
+            statusText.text = if (resetQuickJoin) {
+                "Quick Join could not load A: ${error.message ?: error.javaClass.simpleName}"
+            } else {
+                "Could not load project audio."
+            }
+            metadataText.text = if (resetQuickJoin) "" else error.message ?: error.javaClass.simpleName
             gainSummaryText.text = "Clip gain: unavailable."
             waveformView.clearWaveform()
             updateSelectionUi()
@@ -1129,20 +1243,32 @@ class MainActivity : Activity() {
     }
 
     private fun updateFileActionButtons() {
-        if (!::exportButton.isInitialized || !::addWavButton.isInitialized) return
+        if (!::exportButton.isInitialized || !::addWavButton.isInitialized || !::quickJoinButton.isInitialized) return
         val hasProject = projectEditor != null
         val hasAudio = projectEditor?.project?.tracks?.singleOrNull()?.clips?.isNotEmpty() == true
-        addWavButton.isEnabled = hasProject && !importInProgress && !exportInProgress
-        addWavButton.text = if (importInProgress) "Adding…" else "Add WAV"
-        exportButton.isEnabled = hasAudio && !exportInProgress && !importInProgress
+        val quickJoinActive = quickJoinStage != QuickJoinStage.IDLE
+
+        quickJoinButton.isEnabled = !importInProgress && !exportInProgress && !quickJoinActive
+        quickJoinButton.text = when (quickJoinStage) {
+            QuickJoinStage.IDLE -> "Quick Join"
+            QuickJoinStage.PICKING_FIRST -> "Quick Join: choose A…"
+            QuickJoinStage.LOADING_FIRST -> "Quick Join: loading A…"
+            QuickJoinStage.PICKING_SECOND -> "Quick Join: choose B…"
+            QuickJoinStage.LOADING_SECOND -> "Quick Join: loading B…"
+        }
+
+        addWavButton.isEnabled = hasProject && !importInProgress && !exportInProgress && !quickJoinActive
+        addWavButton.text = if (importInProgress && !quickJoinActive) "Adding…" else "Add WAV"
+        exportButton.isEnabled = hasAudio && !exportInProgress && !importInProgress && !quickJoinActive
         exportButton.text = if (exportInProgress) "Exporting…" else "Export WAV"
         updateHistoryButtons()
     }
 
     private fun updateHistoryButtons() {
         if (!::undoButton.isInitialized || !::redoButton.isInitialized) return
-        undoButton.isEnabled = projectEditor?.canUndo == true && !importInProgress && !exportInProgress
-        redoButton.isEnabled = projectEditor?.canRedo == true && !importInProgress && !exportInProgress
+        val quickJoinActive = quickJoinStage != QuickJoinStage.IDLE
+        undoButton.isEnabled = projectEditor?.canUndo == true && !importInProgress && !exportInProgress && !quickJoinActive
+        redoButton.isEnabled = projectEditor?.canRedo == true && !importInProgress && !exportInProgress && !quickJoinActive
     }
 
     private fun updatePlaybackUi() {
@@ -1240,6 +1366,7 @@ class MainActivity : Activity() {
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(STATE_QUICK_JOIN_STAGE, quickJoinStage.name)
         projectEditor?.project?.let { project ->
             val sources = project.sources.values.toList()
             outState.putStringArrayList(STATE_SOURCE_IDS, ArrayList(sources.map { it.id }))
@@ -1266,6 +1393,7 @@ class MainActivity : Activity() {
             loadedSourceTotalFrames = loadedSourceTotalFrames,
             selectionStart = selectionTimelineStartFrame,
             selectionEnd = selectionTimelineEndFrameExclusive,
+            quickJoinStage = quickJoinStage,
         )
     }
 
@@ -1281,6 +1409,8 @@ class MainActivity : Activity() {
         private const val REQUEST_OPEN_WAV = 2001
         private const val REQUEST_EXPORT_WAV = 2002
         private const val REQUEST_ADD_WAV = 2003
+        private const val REQUEST_QUICK_JOIN_FIRST = 2004
+        private const val REQUEST_QUICK_JOIN_SECOND = 2005
         private const val STATE_SOURCE_IDS = "source_ids"
         private const val STATE_SOURCE_LOCATIONS = "source_locations"
         private const val STATE_CLIP_IDS = "clip_ids"
@@ -1289,6 +1419,7 @@ class MainActivity : Activity() {
         private const val STATE_CLIP_SOURCE_ENDS = "clip_source_ends"
         private const val STATE_CLIP_TIMELINE_STARTS = "clip_timeline_starts"
         private const val STATE_CLIP_GAINS = "clip_gains"
+        private const val STATE_QUICK_JOIN_STAGE = "quick_join_stage"
         private const val TRACK_ID = "track-1"
         private const val HIGH_GAIN_WARNING_DB = 24f
     }
