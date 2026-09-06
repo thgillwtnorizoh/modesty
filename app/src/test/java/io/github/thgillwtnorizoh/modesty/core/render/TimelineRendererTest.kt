@@ -67,6 +67,40 @@ class TimelineRendererTest {
         assertEquals(1f, progress.last(), 0f)
     }
 
+    @Test
+    fun rendererSwitchesDecodersAcrossMultipleSourcesInTimelineOrder() {
+        val rate = SampleRate(1_000)
+        val aSamples = floatArrayOf(0.1f, 0.2f)
+        val bSamples = floatArrayOf(0.7f, 0.8f)
+        val sourceA = AudioSource("a", "a.wav", rate, 1, 2)
+        val sourceB = AudioSource("b", "b.wav", rate, 1, 2)
+        val project = AudioProject(
+            id = "multi",
+            title = "A+B",
+            timelineRate = rate,
+            sources = linkedMapOf(sourceA.id to sourceA, sourceB.id to sourceB),
+            tracks = listOf(
+                AudioTrack(
+                    "track",
+                    "Track",
+                    listOf(
+                        AudioClip("a-clip", sourceA.id, SourceRange(0, 2), 0),
+                        AudioClip("b-clip", sourceB.id, SourceRange(0, 2), 2),
+                    ),
+                ),
+            ),
+        )
+
+        val renderer = TimelineRenderer(project) { source ->
+            MemoryDecoder(rate, if (source.id == sourceA.id) aSamples else bSamples)
+        }
+        val encoder = RecordingEncoder(1)
+        renderer.render(encoder)
+
+        assertEquals(listOf(0.1f, 0.2f, 0.7f, 0.8f), encoder.samples)
+        assertTrue(encoder.finished)
+    }
+
     private class MemoryDecoder(
         private val rate: SampleRate,
         private val samples: FloatArray,
