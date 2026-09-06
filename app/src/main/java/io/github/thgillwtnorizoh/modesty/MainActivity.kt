@@ -14,6 +14,8 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import io.github.thgillwtnorizoh.modesty.core.editing.ProjectEditor
+import io.github.thgillwtnorizoh.modesty.core.editing.TrimClip
 import io.github.thgillwtnorizoh.modesty.core.io.WavDecoder
 import io.github.thgillwtnorizoh.modesty.core.io.WavEncoding
 import io.github.thgillwtnorizoh.modesty.core.model.AudioClip
@@ -36,7 +38,10 @@ class MainActivity : Activity() {
     private lateinit var waveformView: WaveformView
     private lateinit var playPauseButton: Button
     private lateinit var stopButton: Button
+    private lateinit var trimButton: Button
+    private lateinit var undoButton: Button
     private lateinit var timeText: TextView
+    private lateinit var selectionText: TextView
     private lateinit var playbackEngine: AndroidSingleClipPlaybackEngine
 
     private val worker = Executors.newSingleThreadExecutor()
@@ -44,9 +49,15 @@ class MainActivity : Activity() {
     private val uiHandler = Handler(Looper.getMainLooper())
 
     private var selectedUri: String? = null
+    private var projectEditor: ProjectEditor? = null
     private var playbackLoaded = false
-    private var loadedTotalFrames = 0L
     private var loadedSampleRate = 48_000
+    private var clipTimelineStartFrame = 0L
+    private var clipTimelineEndFrameExclusive = 0L
+    private var selectionSourceStartFrame: Long? = null
+    private var selectionSourceEndFrameExclusive: Long? = null
+    private var restoredClipStartFrame: Long? = null
+    private var restoredClipEndFrameExclusive: Long? = null
     private var lastShownPlaybackError: String? = null
 
     private val progressTicker = object : Runnable {
@@ -59,6 +70,13 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         selectedUri = savedInstanceState?.getString(STATE_SELECTED_URI)
+        if (savedInstanceState?.containsKey(STATE_CLIP_SOURCE_START) == true) {
+            restoredClipStartFrame = savedInstanceState.getLong(STATE_CLIP_SOURCE_START)
+        }
+        if (savedInstanceState?.containsKey(STATE_CLIP_SOURCE_END) == true) {
+            restoredClipEndFrameExclusive = savedInstanceState.getLong(STATE_CLIP_SOURCE_END)
+        }
+
         playbackEngine = AndroidSingleClipPlaybackEngine { source ->
             WavDecoder {
                 contentResolver.openInputStream(Uri.parse(source.location))
@@ -86,7 +104,7 @@ class MainActivity : Activity() {
         })
 
         root.addView(TextView(this).apply {
-            text = "Foundation brick 3\nWaveform has acquired vocal cords."
+            text = "Foundation brick 4\nThe waveform has acquired scissors."
             textSize = 16f
             gravity = Gravity.CENTER
             setPadding(0, dp(6), 0, dp(18))
@@ -98,7 +116,7 @@ class MainActivity : Activity() {
         })
 
         statusText = TextView(this).apply {
-            text = "Choose a WAV file to inspect and play."
+            text = "Choose a WAV file to inspect, play, and trim."
             textSize = 15f
             gravity = Gravity.CENTER
             setPadding(0, dp(16), 0, dp(8))
@@ -112,7 +130,7 @@ class MainActivity : Activity() {
         }
         root.addView(metadataText)
 
-        val controls = LinearLayout(this).apply {
+        val playbackControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
@@ -129,15 +147,15 @@ class MainActivity : Activity() {
                 updatePlaybackUi()
             }
         }
-        controls.addView(playPauseButton)
-        controls.addView(stopButton)
-        root.addView(controls)
+        playbackControls.addView(playPauseButton)
+        playbackControls.addView(stopButton)
+        root.addView(playbackControls)
 
         timeText = TextView(this).apply {
             text = "0:00.000 / 0:00.000"
             textSize = 14f
             gravity = Gravity.CENTER
-            setPadding(0, dp(4), 0, dp(10))
+            setPadding(0, dp(4), 0, dp(8))
         }
         root.addView(timeText)
 
@@ -153,11 +171,42 @@ class MainActivity : Activity() {
                     updatePlaybackUi()
                 }
             }
+            onSelectionChanged = { start, end ->
+                selectionSourceStartFrame = start
+                selectionSourceEndFrameExclusive = end
+                updateSelectionUi()
+            }
         }
         root.addView(waveformView)
 
+        selectionText = TextView(this).apply {
+            text = "Drag across the waveform to select a range. Tap to seek."
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setPadding(0, dp(8), 0, dp(4))
+        }
+        root.addView(selectionText)
+
+        val editControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        trimButton = Button(this).apply {
+            text = "Trim"
+            isEnabled = false
+            setOnClickListener { trimToSelection() }
+        }
+        undoButton = Button(this).apply {
+            text = "Undo"
+            isEnabled = false
+            setOnClickListener { undoEdit() }
+        }
+        editControls.addView(trimButton)
+        editControls.addView(undoButton)
+        root.addView(editControls)
+
         root.addView(TextView(this).apply {
-            text = "Tap the waveform to seek. Brick 3 plays mono/stereo WAV at its native sample rate.\nEditing is still deliberately locked outside."
+            text = "Drag selects. Trim changes clip metadata only; the source WAV is never rewritten.\nUndo restores the previous clip range."
             textSize = 12f
             gravity = Gravity.CENTER
             setPadding(0, dp(12), 0, 0)
@@ -181,13 +230,46 @@ class MainActivity : Activity() {
             PlaybackState.PAUSED,
             PlaybackState.STOPPED,
             -> {
-                if (playbackEngine.playheadFrame >= loadedTotalFrames) {
-                    playbackEngine.seekTo(0)
+                if (playbackEngine.playheadFrame >= clipTimelineEndFrameExclusive) {
+                    playbackEngine.seekTo(clipTimelineStartFrame)
                 }
                 playbackEngine.play()
             }
         }
         updatePlaybackUi()
+    }
+
+    private fun trimToSelection() {
+        val editor = projectEditor ?: return
+        val start = selectionSourceStartFrame ?: return
+        val end = selectionSourceEndFrameExclusive ?: return
+        val clip = editor.project.tracks.single().clips.single()
+        if (end <= start || (start == clip.sourceRange.startFrame && end == clip.sourceRange.endFrameExclusive)) return
+
+        playbackEngine.stop()
+        try {
+            editor.apply(
+                TrimClip(
+                    trackId = TRACK_ID,
+                    clipId = CLIP_ID,
+                    newSourceStartFrame = start,
+                    newSourceEndFrameExclusive = end,
+                ),
+            )
+            val duration = end - start
+            bindEditorProject(
+                "Trimmed nondestructively to ${formatDuration(duration, loadedSampleRate)}. Source WAV untouched.",
+            )
+        } catch (error: Throwable) {
+            statusText.text = "Trim failed: ${error.message ?: error.javaClass.simpleName}"
+        }
+    }
+
+    private fun undoEdit() {
+        val editor = projectEditor ?: return
+        if (!editor.undo()) return
+        playbackEngine.stop()
+        bindEditorProject("Undo restored the previous clip range.")
     }
 
     private fun chooseWav() {
@@ -216,18 +298,25 @@ class MainActivity : Activity() {
         }
 
         selectedUri = uri.toString()
+        restoredClipStartFrame = null
+        restoredClipEndFrameExclusive = null
         loadWav(uri)
     }
 
     private fun loadWav(uri: Uri) {
         val generation = loadGeneration.incrementAndGet()
         playbackEngine.stop()
+        projectEditor = null
         playbackLoaded = false
-        loadedTotalFrames = 0
+        clipTimelineStartFrame = 0
+        clipTimelineEndFrameExclusive = 0
+        selectionSourceStartFrame = null
+        selectionSourceEndFrameExclusive = null
         lastShownPlaybackError = null
         statusText.text = "Reading WAV and building waveform…"
         metadataText.text = ""
         waveformView.clearWaveform()
+        updateSelectionUi()
         updatePlaybackUi()
 
         worker.execute {
@@ -254,17 +343,17 @@ class MainActivity : Activity() {
                     totalFrames = metadata.info.totalFrames,
                 )
                 val project = AudioProject(
-                    id = "brick3-project",
+                    id = "brick4-project",
                     title = displayName,
                     timelineRate = source.sampleRate,
                     sources = mapOf(source.id to source),
                     tracks = listOf(
                         ProjectTrack(
-                            id = "track-1",
+                            id = TRACK_ID,
                             name = displayName,
                             clips = listOf(
                                 AudioClip(
-                                    id = "clip-1",
+                                    id = CLIP_ID,
                                     sourceId = source.id,
                                     sourceRange = SourceRange(0, source.totalFrames),
                                     timelineStartFrame = 0,
@@ -273,7 +362,6 @@ class MainActivity : Activity() {
                         ),
                     ),
                 )
-                playbackEngine.load(project)
 
                 val details = buildString {
                     append(displayName)
@@ -293,10 +381,8 @@ class MainActivity : Activity() {
 
                 runOnUiThread {
                     if (generation != loadGeneration.get() || isDestroyed) return@runOnUiThread
-                    playbackLoaded = true
-                    loadedTotalFrames = pyramid.totalFrames
+
                     loadedSampleRate = metadata.info.sampleRate.hz
-                    statusText.text = "Waveform ready. Playback armed."
                     metadataText.text = details
                     waveformView.setWaveform(
                         cache = cache,
@@ -304,19 +390,95 @@ class MainActivity : Activity() {
                         totalFrames = pyramid.totalFrames,
                         channelCount = pyramid.channelCount,
                     )
-                    updatePlaybackUi()
+
+                    val editor = ProjectEditor(project)
+                    val restoredStart = restoredClipStartFrame
+                    val restoredEnd = restoredClipEndFrameExclusive
+                    if (
+                        restoredStart != null &&
+                        restoredEnd != null &&
+                        restoredStart >= 0 &&
+                        restoredEnd <= source.totalFrames &&
+                        restoredEnd > restoredStart &&
+                        (restoredStart != 0L || restoredEnd != source.totalFrames)
+                    ) {
+                        editor.apply(TrimClip(TRACK_ID, CLIP_ID, restoredStart, restoredEnd))
+                    }
+                    restoredClipStartFrame = null
+                    restoredClipEndFrameExclusive = null
+                    projectEditor = editor
+                    bindEditorProject("Waveform ready. Playback and nondestructive trim armed.")
                 }
             } catch (error: Throwable) {
                 runOnUiThread {
                     if (generation != loadGeneration.get() || isDestroyed) return@runOnUiThread
+                    projectEditor = null
                     playbackLoaded = false
                     statusText.text = "Could not read/play this WAV."
                     metadataText.text = error.message ?: error.javaClass.simpleName
                     waveformView.clearWaveform()
+                    updateSelectionUi()
                     updatePlaybackUi()
                 }
             }
         }
+    }
+
+    private fun bindEditorProject(statusMessage: String) {
+        val editor = projectEditor ?: return
+        val project = editor.project
+        val clip = project.tracks.single().clips.single()
+        val clipDuration = project.clipTimelineDurationFrames(clip)
+
+        selectionSourceStartFrame = null
+        selectionSourceEndFrameExclusive = null
+        clipTimelineStartFrame = clip.timelineStartFrame
+        clipTimelineEndFrameExclusive = clip.timelineStartFrame + clipDuration
+        lastShownPlaybackError = null
+
+        playbackEngine.load(project)
+        playbackLoaded = true
+        waveformView.setClipWindow(
+            sourceStartFrame = clip.sourceRange.startFrame,
+            sourceEndFrameExclusive = clip.sourceRange.endFrameExclusive,
+            timelineStartFrame = clipTimelineStartFrame,
+            timelineEndFrameExclusive = clipTimelineEndFrameExclusive,
+        )
+        statusText.text = statusMessage
+        undoButton.isEnabled = editor.canUndo
+        updateSelectionUi()
+        updatePlaybackUi()
+    }
+
+    private fun updateSelectionUi() {
+        if (!::selectionText.isInitialized || !::trimButton.isInitialized) return
+        val editor = projectEditor
+        val start = selectionSourceStartFrame
+        val end = selectionSourceEndFrameExclusive
+
+        if (editor == null || start == null || end == null || end <= start) {
+            selectionText.text = "Drag across the waveform to select a range. Tap to seek."
+            trimButton.isEnabled = false
+            if (::undoButton.isInitialized) undoButton.isEnabled = editor?.canUndo == true
+            return
+        }
+
+        val clip = editor.project.tracks.single().clips.single()
+        val relativeStart = start - clip.sourceRange.startFrame
+        val relativeEnd = end - clip.sourceRange.startFrame
+        val duration = end - start
+        selectionText.text = buildString {
+            append("Selection ")
+            append(formatDuration(relativeStart, loadedSampleRate))
+            append(" → ")
+            append(formatDuration(relativeEnd, loadedSampleRate))
+            append("  (")
+            append(formatDuration(duration, loadedSampleRate))
+            append(')')
+        }
+        trimButton.isEnabled = playbackLoaded &&
+            (start != clip.sourceRange.startFrame || end != clip.sourceRange.endFrameExclusive)
+        undoButton.isEnabled = editor.canUndo
     }
 
     private fun updatePlaybackUi() {
@@ -325,11 +487,18 @@ class MainActivity : Activity() {
         playPauseButton.isEnabled = playbackLoaded
         playPauseButton.text = if (playbackEngine.state == PlaybackState.PLAYING) "Pause" else "Play"
         stopButton.isEnabled = playbackLoaded &&
-            (playbackEngine.state != PlaybackState.STOPPED || playbackEngine.playheadFrame > 0)
+            (playbackEngine.state != PlaybackState.STOPPED || playbackEngine.playheadFrame > clipTimelineStartFrame)
 
-        val frame = playbackEngine.playheadFrame.coerceIn(0L, loadedTotalFrames.coerceAtLeast(0L))
+        if (!playbackLoaded || clipTimelineEndFrameExclusive <= clipTimelineStartFrame) {
+            timeText.text = "0:00.000 / 0:00.000"
+            return
+        }
+
+        val frame = playbackEngine.playheadFrame.coerceIn(clipTimelineStartFrame, clipTimelineEndFrameExclusive)
         waveformView.setPlayheadFrame(frame)
-        timeText.text = "${formatDuration(frame, loadedSampleRate)} / ${formatDuration(loadedTotalFrames, loadedSampleRate)}"
+        val relativeFrame = frame - clipTimelineStartFrame
+        val durationFrames = clipTimelineEndFrameExclusive - clipTimelineStartFrame
+        timeText.text = "${formatDuration(relativeFrame, loadedSampleRate)} / ${formatDuration(durationFrames, loadedSampleRate)}"
 
         val error = playbackEngine.lastError
         if (error != null && error != lastShownPlaybackError) {
@@ -367,6 +536,10 @@ class MainActivity : Activity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         selectedUri?.let { outState.putString(STATE_SELECTED_URI, it) }
+        projectEditor?.project?.tracks?.singleOrNull()?.clips?.singleOrNull()?.let { clip ->
+            outState.putLong(STATE_CLIP_SOURCE_START, clip.sourceRange.startFrame)
+            outState.putLong(STATE_CLIP_SOURCE_END, clip.sourceRange.endFrameExclusive)
+        }
         super.onSaveInstanceState(outState)
     }
 
@@ -381,5 +554,9 @@ class MainActivity : Activity() {
     companion object {
         private const val REQUEST_OPEN_WAV = 2001
         private const val STATE_SELECTED_URI = "selected_wav_uri"
+        private const val STATE_CLIP_SOURCE_START = "clip_source_start"
+        private const val STATE_CLIP_SOURCE_END = "clip_source_end"
+        private const val TRACK_ID = "track-1"
+        private const val CLIP_ID = "clip-1"
     }
 }

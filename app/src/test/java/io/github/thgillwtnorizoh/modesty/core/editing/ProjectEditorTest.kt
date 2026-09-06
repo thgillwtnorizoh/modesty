@@ -6,6 +6,7 @@ import io.github.thgillwtnorizoh.modesty.core.model.AudioSource
 import io.github.thgillwtnorizoh.modesty.core.model.AudioTrack
 import io.github.thgillwtnorizoh.modesty.core.model.SampleRate
 import io.github.thgillwtnorizoh.modesty.core.model.SourceRange
+import io.github.thgillwtnorizoh.modesty.core.playback.SingleClipPlaybackPlan
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Test
@@ -44,6 +45,27 @@ class ProjectEditorTest {
         assertEquals(SourceRange(24_000, 72_000), clip.sourceRange)
         assertEquals(24_000, clip.timelineStartFrame)
         assertSame(original.sources["source-1"], editor.project.sources["source-1"])
+    }
+
+    @Test
+    fun trimAndUndoKeepPlaybackWindowAligned() {
+        val editor = ProjectEditor(project())
+
+        editor.apply(TrimClip("track-1", "clip-1", 24_000, 72_000))
+        val trimmedPlan = SingleClipPlaybackPlan.from(editor.project)
+
+        assertEquals(24_000, trimmedPlan.timelineStartFrame)
+        assertEquals(72_000, trimmedPlan.timelineEndFrameExclusive)
+        assertEquals(24_000, trimmedPlan.sourceFrameForTimeline(24_000))
+        assertEquals(72_000, trimmedPlan.sourceFrameForTimeline(72_000))
+
+        editor.undo()
+        val restoredPlan = SingleClipPlaybackPlan.from(editor.project)
+
+        assertEquals(0, restoredPlan.timelineStartFrame)
+        assertEquals(96_000, restoredPlan.timelineEndFrameExclusive)
+        assertEquals(0, restoredPlan.sourceFrameForTimeline(0))
+        assertEquals(96_000, restoredPlan.sourceFrameForTimeline(96_000))
     }
 
     @Test

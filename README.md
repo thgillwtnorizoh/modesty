@@ -15,16 +15,28 @@ The foundation is being built and tested one brick at a time:
 - edit transactions with undo and redo
 - DSP contracts kept independent from UI
 - multi-resolution waveform cache
-- playback, decode, and encode boundaries
+- real WAV decoding
+- hardware-derived playback playhead
 - Android shell kept dependency-light
 
 The project currently targets `compileSdk 36` / `targetSdk 36` and uses JDK 17. This is intentional while the core is being established so CI does not depend on API 37 tooling.
 
 ## Current brick
 
-**Brick #2: WAV ingestion and waveform generation**
+**Brick #4: selection + nondestructive trim + undo**
 
-The Android shell can pick a real WAV document, parse its metadata, decode its samples to floating-point PCM, build a multi-resolution min/max/RMS waveform pyramid off the UI thread, and render the waveform.
+The Android shell can now:
+
+- pick and decode a real WAV
+- build and render its waveform pyramid
+- play/pause/stop through Android `AudioTrack`
+- tap the waveform to seek
+- drag across the waveform to create a selection
+- trim the clip to that selected source range without modifying the WAV
+- redraw and replay only the trimmed clip range
+- undo the trim back to the previous project state
+
+The waveform cache still describes the immutable full source. Trimming only changes clip metadata and asks the cache for a smaller visible source range, so waveform analysis is not rebuilt after each trim.
 
 Currently supported WAV sample encodings:
 
@@ -32,7 +44,7 @@ Currently supported WAV sample encodings:
 - IEEE float: 32 and 64-bit
 - WAVE_FORMAT_EXTENSIBLE when its sub-format is PCM or IEEE float
 
-Playback and editing are intentionally not connected to the UI yet.
+Playback is still intentionally limited to one mono/stereo clip at its native sample rate. Mixing, resampling, split/delete, effects UI, and export come later.
 
 ## First useful target
 

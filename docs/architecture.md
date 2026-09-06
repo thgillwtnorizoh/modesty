@@ -41,6 +41,8 @@ Continuous touch interactions use `ProjectEditor` transactions:
 
 A completed gesture therefore becomes one undo entry.
 
+Brick #4 connects the existing `TrimClip` operation to the Android shell. A trim changes only `AudioClip.sourceRange` and, when trimming from the left, advances the clip's timeline start by the matching duration. The source WAV remains unchanged. Undo swaps the project metadata back to the previous state.
+
 ## DSP
 
 DSP operates on interleaved floating-point PCM and has no Android/UI dependency. `GainProcessor` is intentionally tiny and acts as the reference for future processors.
@@ -59,39 +61,52 @@ Brick #2 implements a streaming waveform pyramid. The base level records min, ma
 
 The current cache is in-memory. A later brick can persist or tile waveform data without changing the UI-facing cache contract.
 
-Brick #3 adds a playhead to the same `WaveformView`. The view knows only the current frame and maps a tap back to a requested source/timeline frame; it does not own playback.
+Brick #4 makes the waveform view clip-aware. The cache still represents the immutable full source, while the view requests only the clip's current source range. This means trimming does not rebuild waveform analysis. The view keeps source and timeline windows separate so a later resampler can change their ratio without redesigning touch mapping.
+
+Touch behaviour at Brick #4 is intentionally small:
+
+- tap maps the visible timeline window to a seek request
+- horizontal drag maps the visible source window to a selection
+- the selection is presentation state, not an edit
+- pressing Trim converts that selection into one `TrimClip` edit
 
 ## Playback
 
-Brick #3 activates the `PlaybackEngine` boundary with `AndroidSingleClipPlaybackEngine`.
+Brick #3 adds the first real playback backend. `SingleClipPlaybackPlan` maps the current project/track/clip metadata into one playable source range. `AndroidSingleClipPlaybackEngine` consumes that plan through `AudioDecoder`, streams float PCM to Android `AudioTrack`, and derives the visible playhead from `AudioTrack.playbackHeadPosition` rather than a UI timer.
 
-The engine deliberately supports only one clip on one track, mono or stereo output, with the project timeline rate equal to the source rate. `SingleClipPlaybackPlan` performs the project/clip -> source-frame mapping in Android-free code and is unit tested. This limitation is intentional: it proves clocking, pause/resume, seeking, end-of-file behaviour, and decoder/output integration before a mixer or resampler is introduced.
+The current playback foundation deliberately supports exactly one clip on one track, mono/stereo output, and a project rate equal to the source rate. There is no mixer or resampler yet.
 
-The reference backend streams float PCM from `AudioDecoder` into Android `AudioTrack`. The UI polls the engine's hardware-derived playhead and draws it over the waveform. Tapping the waveform seeks the engine; tapping while playing resumes from the requested frame.
-
-`AudioTrack` is not a permanent architectural dependency. Once the timeline behaviour is proven on devices, a later backend can use Oboe/AAudio without changing the project model or editor-facing `PlaybackEngine` contract.
-
-Current deliberate Brick #3 exclusions:
-
-- no mixed sample-rate playback / resampler
-- no multi-clip or multi-track mixer
-- no fades or clip gain in the playback path
-- no background playback policy
-- no audio-focus layer yet
+After Brick #4, every trim or undo reloads the playback plan from the current `ProjectEditor.project`, so playback and waveform presentation receive the same clip boundaries.
 
 ## Android shell
 
-Android owns document selection and presentation. WAV decoding and waveform analysis run on a worker thread. Playback owns a separate worker and never performs file decoding on the UI thread.
+Android owns document selection and presentation only. WAV decoding and waveform analysis run on a worker thread; the activity receives completed metadata and a cache to draw.
 
-The activity pauses playback when it leaves the foreground and releases the playback engine when destroyed.
+The activity currently wires together:
+
+```text
+Document Uri
+   |
+   +--> WavDecoder --> waveform pyramid/cache
+   |
+   +--> AudioSource --> AudioProject --> ProjectEditor
+                                      |          |
+                                      |          +--> Trim / Undo
+                                      |
+                                      +--> playback plan --> AudioTrack
+                                      |
+                                      +--> clip window --> WaveformView
+```
+
+The current clip source range is saved through Android instance state so a simple configuration recreation does not silently restore the full source after a trim.
 
 ## I/O direction
 
-Encoder APIs remain contracts. Later implementation direction remains:
+Encoder APIs remain contracts. Likely later implementation direction:
 
 - Oboe/AAudio for the mature realtime backend
 - native resampling/mixing engine
 - format-specific decoders where sensible
 - FFmpeg-backed compatibility layer for broad import/export
 
-These remain implementation choices behind stable project/editor boundaries.
+These are implementation decisions, not project-model dependencies.
